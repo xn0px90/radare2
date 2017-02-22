@@ -19,12 +19,12 @@ static inline ut32 find_binfile_id_by_fd (RBin *bin, ut32 fd) {
 static void cmd_open_bin(RCore *core, const char *input) {
 	const char* help_msg[] = {
 		"Usage:", "ob", " # List open binary files backed by fd",
-		"ob", "", "List opened binfiles and bin objects",
-		"ob", " [fd # bobj #]", "Prioritize by fd number and object number",
-		"obb", " [fd #]", "Prioritize by fd number with current selected object",
-		"ob-", " [fd #]", "Delete binfile by fd",
-		"obd", " [binobject #]", "Delete binfile object numbers, if more than 1 object is loaded",
-		"obo", " [binobject #]", "Prioritize by bin object number",
+		"ob", "", "List opened binary files and objid",
+		"ob", " [fd objid]", "Switch to open binary file by fd number and objid",
+		"obb", " [fd]", "Switch to open binfile by fd number",
+		"ob-", " [fd]", "Delete binfile by fd",
+		"obd", " [objid]", "Delete binary file by objid. Do nothing if only one loaded.",
+		"obo", " [objid]", "Switch to open binary file by objid",
 		NULL};
 	const char *value = NULL;
 	ut32 binfile_num = -1, binobj_num = -1;
@@ -215,7 +215,7 @@ static void cmd_open_map (RCore *core, const char *input) {
 		free (s);
 		break;
 	case '-':
-		if (atoi (input+3)>0) {
+		if (atoi (input + 3)>0) {
 			r_io_map_del (core->io,
 					r_num_math (core->num, input+2));
 		} else {
@@ -237,7 +237,7 @@ static void cmd_open_map (RCore *core, const char *input) {
 	r_core_block_read (core);
 }
 
-R_API void r_core_file_reopen_in_malloc(RCore *core) {
+R_API void r_core_file_reopen_in_malloc (RCore *core) {
 	RCoreFile *f;
 	RListIter *iter;
 	r_list_foreach (core->files, iter, f) {
@@ -263,7 +263,7 @@ R_API void r_core_file_reopen_in_malloc(RCore *core) {
 	}
 }
 
-R_API void r_core_file_reopen_debug(RCore *core, const char *args) {
+R_API void r_core_file_reopen_debug (RCore *core, const char *args) {
 	RCoreFile *ofile = core->file;
 	RBinFile *bf = NULL;
 	char *binpath = NULL;
@@ -289,11 +289,12 @@ R_API void r_core_file_reopen_debug(RCore *core, const char *args) {
 	char *newfile2 = strdup (newfile);
 	core->file->desc->uri = newfile;
 	core->file->desc->referer = NULL;
-	r_core_file_reopen (core, newfile, 0, 2);
+	//r_core_file_reopen (core, newfile, 0, 2);
 	r_config_set_i (core->config, "asm.bits", bits);
 	r_config_set_i (core->config, "cfg.debug", true);
+	r_core_file_reopen (core, newfile, 0, 2);
 	newfile = newfile2;
-
+#if !__WINDOWS__
 	//XXX: need cmd_debug.h for r_debug_get_baddr
 	ut64 new_baddr = r_debug_get_baddr (core, newfile);
 	ut64 old_baddr = r_config_get_i (core->config, "bin.baddr");
@@ -302,22 +303,25 @@ R_API void r_core_file_reopen_debug(RCore *core, const char *args) {
 		r_config_set_i (core->config, "bin.baddr", new_baddr);
 		r_core_bin_load (core, newfile, new_baddr);
 	}
+#endif
 	r_core_cmd0 (core, "sr PC");
 	free (oldname);
 	free (binpath);
 	free (newfile);
 }
 
+
 static int cmd_open(void *data, const char *input) {
 	const char *help_msg[] = {
 		"Usage: o","[com- ] [file] ([offset])","",
 		"o","","list opened files",
+		"o=","","list opened files (ascii-art bars)",
 		"o*","","list opened files in r2 commands",
-		"oa"," [addr]","Open bin info from the given address",
-		"ob","[lbdos] [...]","list open binary files backed by fd",
-		"ob"," 4","priorize io and fd on 4 (bring to binfile to front)",
+		"oa"," [?] [addr]","Open bin info from the given address",
+		"ob"," [?] [lbdos] [...]","list open binary files backed by fd",
 		"oc"," [file]","open core file, like relaunching r2",
-		"oj","","list opened files in JSON format",
+		"oi","[-|idx]","alias for o, but using index instead of fd",
+		"oj","[?]	","list opened files in JSON format",
 		"oL","","list all IO plugins registered",
 		"om","[?]","create, list, remove IO maps",
 		"on"," [file] 0x4000","map raw file at 0x4000 (no r_bin involved)",
@@ -326,12 +330,12 @@ static int cmd_open(void *data, const char *input) {
 		"ood"," [args]","reopen in debugger mode (with args)",
 		"oo[bnm]"," [...]","see oo? for help",
 		"op"," ["R_LIB_EXT"]","open r2 native plugin (asm, bin, core, ..)",
-		"o"," 4","priorize io on fd 4 (bring to front)",
+		"o"," 4","Switch to open file on fd 4",
 		"o","-1","close file descriptor 1",
 		"o-","*","close all opened files",
 		"o--","","close all files, analysis, binfiles, flags, same as !r2 --",
 		"o"," [file]","open [file] file in read-only",
-		"o","+[file]","open file in read-write mode",
+		"o","+ [file]","open file in read-write mode",
 		"o"," [file] 0x4000","map file at 0x4000",
 		NULL
 	};
@@ -440,61 +444,126 @@ static int cmd_open(void *data, const char *input) {
 			return 0;
 		}
 		if (input[1]==' ') {
-			if (r_lib_open (core->lib, input+2) == R_FAIL)
+			if (r_lib_open (core->lib, input+2) == R_FAIL) {
 				eprintf ("Oops\n");
+			}
 		} else {
 			eprintf ("Usage: op [r2plugin."R_LIB_EXT"]\n");
+		}
+		break;
+	case 'i': // "oi"
+		switch (input[1]) {
+		case ' ': // "oi "
+			{
+				RListIter *iter = NULL;
+				RCoreFile *f;
+				int nth = r_num_math (core->num, input + 2);
+				int count = 0;
+				r_list_foreach (core->files, iter, f) {
+					if (count == nth) {
+						r_io_raise (core->io, num);
+						break;
+					}
+					count++;
+				}
+			}
+			break;
+		case '-': // "oi-"
+			{
+				RListIter *iter = NULL;
+				RCoreFile *f;
+				int nth = r_num_math (core->num, input + 2);
+				int count = 0;
+				r_list_foreach (core->files, iter, f) {
+					if (count == nth) {
+						r_core_file_close_fd (core, f->desc->fd);
+						break;
+					}
+					count++;
+				}
+			}
+			break;
+		case 'j':
+		case '*':
+		case 0:
+			r_core_file_list (core, input[1]);
+			break;
 		}
 		break;
 	case '+':
 		perms = R_IO_READ|R_IO_WRITE;
 		/* fall through */
-	case 'n':
+	case 'f':
+		/* open file with spaces or special chars */
+		if (input[1] == ' ') {
+			const char *fn = input + 2;
+			file = r_core_file_open (core, fn, perms, 0);
+			if (file) {
+				r_core_bin_load (core, fn, UT64_MAX);
+			} else {
+				eprintf ("Cannot open (%s)\n", fn);
+			}
+		} else {
+			eprintf ("Usage: of [path-to-file]\n");
+		}
+		break;
+	case 'n': // "on"
 		// like in r2 -n
 		isn = 1;
 		/* fall through */
 	case ' ':
-		if (input[(isn?2:1) - 1] == '\x00') {
-			eprintf ("Usage: on [file]\n");
-			break;
-		}
-		ptr = strchr (input+(isn?2:1), ' ');
-		if (ptr && ptr[1]=='0' && ptr[2]=='x') { // hack to fix opening files with space in path
-			*ptr = '\0';
-			addr = r_num_math (core->num, ptr+1);
-		} else {
-			num = atoi (ptr? ptr: input+1);
-			addr = 0LL;
-		}
-		if (num <= 0) {
-			const char *fn = input+1; //(isn?2:1);
-			if (fn && *fn) {
-				if (isn) fn++;
-				file = r_core_file_open (core, fn, perms, addr);
-				if (file) {
-					r_cons_printf ("%d\n", file->desc->fd);
-					// MUST CLEAN BEFORE LOADING
-					if (!isn)
-						r_core_bin_load (core, fn, baddr);
-				} else if (!nowarn) {
-					eprintf ("Cannot open file '%s'\n", fn);
+		{
+			ut64 ba = 0L;
+			ut64 ma = 0L;
+			char *fn = strdup (input + (isn? 2:1));
+			if (!*fn) {
+				eprintf ("Usage: on [file]\n");
+				break;
+			}
+			ptr = strchr (fn, ' ');
+			if (ptr) {
+				*ptr++ = '\0';
+				char *ptr2 = strchr (ptr, ' ');
+				if (ptr2) {
+					*ptr2++ = 0;
+					ba = r_num_math (core->num, ptr2);
+				}
+				ma = r_num_math (core->num, ptr);
+			}
+			int num = atoi (input + 1);
+			if (num <= 0) {
+				if (fn && *fn) {
+					file = r_core_file_open (core, fn, perms, ma);
+					if (file) {
+						r_cons_printf ("%d\n", file->desc->fd);
+						// MUST CLEAN BEFORE LOADING
+						if (!isn) {
+							r_core_bin_load (core, fn, ba);
+						}
+					} else if (!nowarn) {
+						eprintf ("Cannot open file '%s'\n", fn);
+					}
+				} else {
+					eprintf ("Usage: on [file] ([maddr]) ([baddr])\n");
 				}
 			} else {
-				eprintf ("Usage: on [file]\n");
-			}
-		} else {
-			RListIter *iter = NULL;
-			RCoreFile *f;
-			core->switch_file_view = 0;
-			r_list_foreach (core->files, iter, f) {
-				if (f->desc->fd == num) {
-					r_io_raise (core->io, num);
-					core->switch_file_view = 1;
-					break;
+				RListIter *iter = NULL;
+				RCoreFile *f;
+				core->switch_file_view = 0;
+				r_list_foreach (core->files, iter, f) {
+					if (f->desc->fd == num) {
+						r_io_raise (core->io, num);
+						core->switch_file_view = 1;
+						// raise rbinobj too
+						int binfile_num = find_binfile_id_by_fd (core->bin, num);
+						r_core_bin_raise (core, binfile_num, -1);
+						break;
+					}
 				}
 			}
+			r_core_block_read (core);
+			free (fn);
 		}
-		r_core_block_read (core);
 		break;
 	case 'b':
 		cmd_open_bin (core, input);
@@ -520,9 +589,10 @@ static int cmd_open(void *data, const char *input) {
 			// TODO: rbin?
 			break;
 		default:
-			if (!r_core_file_close_fd (core, atoi (input+1)))
+			if (!r_core_file_close_fd (core, atoi (input + 1))) {
 				eprintf ("Unable to find filedescriptor %d\n",
-						atoi (input+1));
+						atoi (input + 1));
+			}
 			break;
 		case '?':
 			eprintf ("Usage: o-# or o-*, where # is the filedescriptor number\n");

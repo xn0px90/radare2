@@ -1,10 +1,12 @@
-/* radare - LGPL - Copyright 2007-2015 - pancake */
+/* radare - LGPL - Copyright 2007-2016 - pancake, alvarofe */
 // TODO: RRef - reference counting
 
 #include <stdio.h>
 
 #define _R_LIST_C_
 #include "r_util.h"
+
+#define MERGE_DEPTH 50
 
 inline RListIter *r_list_iter_new () {
 	return calloc (1, sizeof (RListIter));
@@ -129,27 +131,25 @@ R_API void r_list_split_iter(RList *list, RListIter *iter) {
 }
 
 //Warning: free functions must be compatible
-#define r_list_empty(x) (!x || (!(x->head) && !(x->tail)))
 R_API int r_list_join(RList *list1, RList *list2) {
 	if (!list1 || !list2) {
 		return 0;
-	}	
-	if (r_list_empty (list2)) {
+	}
+	if (!(list2->length)) {
 		return 0;
 	}
-	if (r_list_empty (list1)) {
+	if (!(list1->length)) {
 		list1->head = list2->head;
 		list1->tail = list2->tail;
-	} else if (!list1->tail) {
-		list1->tail = list2->head;
-	} else if (list2->head != NULL) {
+	} else {
 		list1->tail->n = list2->head;
 		list2->head->p = list1->tail;
+		list1->tail = list2->tail;
+		list1->tail->n = NULL;
+		list1->sorted = false;
 	}
 	list1->length += list2->length;
 	list2->head = list2->tail = NULL;
-	list1->sorted = true;
-	/* the caller must free list2 */
 	return 1;
 }
 
@@ -453,7 +453,7 @@ R_API RListIter *r_list_find(const RList *list, const void *p, RListComparator c
 }
 
 static RListIter *_merge(RListIter *first, RListIter *second, RListComparator cmp) {
-	if (!first) { 
+	if (!first) {
 		return second;
 	}
 	if (!second) {
@@ -464,7 +464,7 @@ static RListIter *_merge(RListIter *first, RListIter *second, RListComparator cm
 		second->n->p = second;
 		second->p = NULL;
 		return second;
-	} 
+	}
 	first->n = _merge (first->n, second, cmp);
 	first->n->p = first;
 	first->p = NULL;
@@ -477,7 +477,7 @@ static RListIter * _r_list_half_split(RListIter *head) {
 	RListIter *slow;
 	if (!head || !head->n) {
 		return head;
-	} 
+	}
 	slow = head;
 	fast = head;
 	while (fast && fast->n && fast->n->n) {
@@ -489,38 +489,52 @@ static RListIter * _r_list_half_split(RListIter *head) {
 	return tmp;
 }
 
-static RListIter * _merge_sort(RListIter *head, RListComparator cmp) {
+static RListIter * _merge_sort(RListIter *head, RListComparator cmp, int depth) {
 	RListIter *second;
 	if (!head || !head->n) {
 		return head;
 	}
+	if (depth == MERGE_DEPTH) {
+		RListIter *it, *it2;
+		for (it = head; it && it->data; it = it->n) {
+			for (it2 = it->n; it2 && it2->data; it2 = it2->n) {
+				if (cmp (it->data, it2->data) > 0) {
+					void *t = it->data;
+					it->data = it2->data;
+					it2->data = t;
+				}
+			}
+		}
+		return head;
+	}
 	second = _r_list_half_split (head);
-	head = _merge_sort (head, cmp);
-	second = _merge_sort (second, cmp);
+	head = _merge_sort (head, cmp, depth++);
+	second = _merge_sort (second, cmp, depth++);
 	return _merge (head, second, cmp);
 }
 
 R_API void r_list_merge_sort(RList *list, RListComparator cmp) {
-	if (!list->sorted) {
-		if (list && list->head && cmp) {
-			RListIter *iter;
-			list->head = _merge_sort (list->head, cmp);
-			//update tail reference
-			iter = list->head;
-			while (iter && iter->n) {
-				iter = iter->n;
-			}
-			list->tail = iter;
-		}
-		list->sorted = true;
+	if (!list) {
+		return;
 	}
+	if (!list->sorted && list->head && cmp) {
+		RListIter *iter;
+		list->head = _merge_sort (list->head, cmp, 0);
+		//update tail reference
+		iter = list->head;
+		while (iter && iter->n) {
+			iter = iter->n;
+		}
+		list->tail = iter;
+	}
+	list->sorted = true;
 }
 
 R_API void r_list_insertion_sort(RList *list, RListComparator cmp) {
-	if (!list->sorted) {
+	if (list && !list->sorted) {
 		RListIter *it;
 		RListIter *it2;
-		if (list && cmp) {
+		if (cmp) {
 			for (it = list->head; it && it->data; it = it->n) {
 				for (it2 = it->n; it2 && it2->data; it2 = it2->n) {
 					if (cmp (it->data, it2->data) > 0) {
@@ -537,14 +551,16 @@ R_API void r_list_insertion_sort(RList *list, RListComparator cmp) {
 
 //chose wisely based on length
 R_API void r_list_sort(RList *list, RListComparator cmp) {
-	if (list->length > 43) {
-		r_list_merge_sort (list, cmp);
-	} else {
-		r_list_insertion_sort (list, cmp);
+	if (list) {
+		if (list->length > 43) {
+			r_list_merge_sort (list, cmp);
+		} else {
+			r_list_insertion_sort (list, cmp);
+		}
 	}
 }
- 
- 
+
+
 
 #if TEST
 

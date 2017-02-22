@@ -84,12 +84,14 @@ R_API int r_core_dump(RCore *core, const char *file, ut64 addr, ut64 size, int a
 		fclose (fd);
 		return false;
 	}
-	r_cons_break (NULL, NULL);
-	for (i = 0; i<size; i += bs) {
-		if (r_cons_singleton ()->breaked)
+	r_cons_break_push (NULL, NULL);
+	for (i = 0; i < size; i += bs) {
+		if (r_cons_is_breaked ()) {
 			break;
-		if ((i + bs) > size)
+		}
+		if ((i + bs) > size) {
 			bs = size - i;
+		}
 		r_io_read_at (core->io, addr + i, buf, bs);
 		if (fwrite (buf, bs, 1, fd) < 1) {
 			eprintf ("write error\n");
@@ -97,7 +99,7 @@ R_API int r_core_dump(RCore *core, const char *file, ut64 addr, ut64 size, int a
 		}
 	}
 	eprintf ("dumped 0x%"PFMT64x" bytes\n", i);
-	r_cons_break_end ();
+	r_cons_break_pop ();
 	fclose (fd);
 	free (buf);
 	return true;
@@ -248,7 +250,6 @@ beach:
 static void _set_bits(RCore *core, ut64 addr, int *bits) {
 	RAnalRange *range;
 	RListIter *iter;
-
 	r_list_foreach (core->anal->bits_ranges, iter, range) {
 		if (addr >= range->from && addr < range->to) {
 			*bits = range->bits;
@@ -258,7 +259,7 @@ static void _set_bits(RCore *core, ut64 addr, int *bits) {
 }
 
 
-R_API int r_core_seek_archbits(RCore *core, ut64 addr) {
+R_API void r_core_seek_archbits(RCore *core, ut64 addr) {
 	static char *oldarch = NULL;
 	static int oldbits = 0;
 	bool flag = false;
@@ -291,7 +292,7 @@ R_API int r_core_seek_archbits(RCore *core, ut64 addr) {
 			}
 		}
 		free (arch);
-		return 1;
+		return;
 	}
 	if (oldarch) {
 		if (!(flag && arch && oldarch && !strcmp (oldarch, arch))) {
@@ -303,7 +304,6 @@ R_API int r_core_seek_archbits(RCore *core, ut64 addr) {
 		r_config_set_i (core->config, "asm.bits", oldbits);
 	}
 	free (arch);
-	return 0;
 }
 
 R_API bool r_core_seek(RCore *core, ut64 addr, bool rb) {
@@ -316,18 +316,20 @@ R_API bool r_core_seek(RCore *core, ut64 addr, bool rb) {
 	newsection = core->io->section;
 
 	if (ret == UT64_MAX) {
-		if (!core->io->va)
+		if (!core->io->va) {
 			return false;
+		}
 	} else {
 		core->offset = addr;
 	}
 	if (rb) {
 		ret = r_core_block_read (core);
 		if (core->io->ff) {
-			if (ret < 1 || ret > core->blocksize)
+			if (ret < 1 || ret > core->blocksize) {
 				memset (core->block, core->io->Oxff, core->blocksize);
-			else
+			} else {
 				memset (core->block+ret, core->io->Oxff, core->blocksize-ret);
+			}
 			ret = core->blocksize;
 			core->offset = addr;
 		} else {
@@ -373,7 +375,7 @@ R_API int r_core_write_at(RCore *core, ut64 addr, const ut8 *buf, int size) {
 	ret = r_io_use_desc (core->io, core->file->desc);
 	if (ret != -1) {
 		ret = r_io_write_at (core->io, addr, buf, size);
-		if (addr >= core->offset && addr <= core->offset+core->blocksize) {
+		if (addr >= core->offset && addr <= core->offset + core->blocksize) {
 			r_core_block_read (core);
 		}
 	}
@@ -482,7 +484,9 @@ R_API int r_core_read_at(RCore *core, ut64 addr, ut8 *buf, int size) {
 		}
 		return false;
 	}
-	r_io_use_desc (core->io, core->file->desc);
+	if (core->file) {
+		r_io_use_desc (core->io, core->file->desc);
+	}
 	return r_io_read_at (core->io, addr, buf, size);
 }
 

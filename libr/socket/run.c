@@ -34,16 +34,26 @@
 #include <sys/ioctl.h>
 #include <sys/resource.h>
 #include <termios.h>
-#include <signal.h>
 #include <grp.h>
 #include <errno.h>
+#if defined(__sun)
+#include <sys/filio.h>
+#endif
 #if __linux__ && !__ANDROID__
 #include <sys/personality.h>
 #include <pty.h>
+#include <utmp.h>
 #endif
 #if defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
 #include <util.h>
 #endif
+#endif
+
+#define HAVE_PTY __UNIX__ && !__ANDROID__ && LIBC_HAVE_FORK && !defined(__sun)
+
+#if EMSCRIPTEN
+#undef HAVE_PTY
+#define HAVE_PTY 0
 #endif
 
 R_API RRunProfile *r_run_new(const char *str) {
@@ -117,29 +127,30 @@ static char *getstr(const char *src) {
 		}
 		return NULL;
 	case '"':
-		ret = strdup (src+1);
+		ret = strdup (src + 1);
 		if (ret) {
 			len = strlen (ret);
-			if (len>0) {
+			if (len > 0) {
 				len--;
-				if (ret[len]=='"') {
+				if (ret[len] == '"') {
 					ret[len] = 0;
 					r_str_unescape (ret);
 					return ret;
-				} else eprintf ("Missing \"\n");
+				}
+				eprintf ("Missing \"\n");
 			}
 			free (ret);
 		}
 		return NULL;
 	case '@':
 		{
-			char *pat = strchr (src+1, '@');
+			char *pat = strchr (src + 1, '@');
 			if (pat) {
 				int i, len, rep;
 				*pat++ = 0;
 				rep = atoi (src + 1);
 				len = strlen (pat);
-				if (rep>0) {
+				if (rep > 0) {
 					char *buf = malloc (rep);
 					if (buf) {
 						for (i = 0; i < rep; i++) {
@@ -152,23 +163,35 @@ static char *getstr(const char *src) {
 			// slurp file
 			return r_file_slurp (src + 1, NULL);
 		}
+	case '`':
+		{
+		char *msg = strdup (src + 1);
+		int msg_len = strlen (msg);
+		if (msg_len > 0) {
+			msg [msg_len - 1] = 0;
+			char *ret = r_str_trim_tail (r_sys_cmd_str (msg, NULL, NULL));
+			free (msg);
+			return ret;
+		}
+		free (msg);
+		return strdup ("");
+		}
 	case '!':
 		return r_str_trim_tail (r_sys_cmd_str (src + 1, NULL, NULL));
 	case ':':
-		if (src[1]=='!') {
+		if (src[1] == '!') {
 			ret = r_str_trim_tail (r_sys_cmd_str (src + 1, NULL, NULL));
 		} else {
 			ret = strdup (src);
 		}
-		len = r_hex_str2bin (src+1, (ut8*)ret);
+		len = r_hex_str2bin (src + 1, (ut8*)ret);
 		if (len > 0) {
 			ret[len] = 0;
 			return ret;
-		} else {
-			eprintf ("Invalid hexpair string\n");
-			free (ret);
-			return NULL;
 		}
+		eprintf ("Invalid hexpair string\n");
+		free (ret);
+		return NULL;
 	}
 	r_str_unescape ((ret = strdup (src)));
 	return ret;
@@ -181,20 +204,30 @@ static int parseBool (const char *e) {
 		0: 1): 1): 1);
 }
 
+#if __linux__
+#define RVAS "/proc/sys/kernel/randomize_va_space"
+static void setRVA(const char *v) {
+	int fd = open (RVAS, O_WRONLY);
+	if (fd != -1) {
+		write (fd, v, 2);
+		close (fd);
+	}
+}
+#endif
+
 // TODO: move into r_util? r_run_... ? with the rest of funcs?
 static void setASLR(int enabled) {
 #if __linux__
-#define RVAS "/proc/sys/kernel/randomize_va_space"
 	if (enabled) {
-		system ("echo 2 > "RVAS);
+		setRVA ("2\n");
 	} else {
 #if __ANDROID__
-		system ("echo 0 > "RVAS);
+		setRVA ("0\n");
 #else
 #ifdef ADDR_NO_RANDOMIZE
 		if (personality (ADDR_NO_RANDOMIZE) == -1)
 #endif
-			system ("echo 0 > "RVAS);
+			setRVA ("0\n");
 #endif
 	}
 #elif __APPLE__
@@ -210,56 +243,53 @@ static void setASLR(int enabled) {
 #endif
 }
 
+static void restore_saved_fd (int saved, bool resore, int fd) {
+	if (saved == -1) {
+		return;
+	}
+	if (resore) {
+		dup2 (saved, fd);
+	}
+
+	close (saved);
+}
+
 static int handle_redirection_proc (const char *cmd, bool in, bool out, bool err) {
-#if __UNIX__ && !__ANDROID__ && LIBC_HAVE_FORK
+#if HAVE_PTY
 	// use PTY to redirect I/O because pipes can be problematic in
 	// case of interactive programs.
-	int fdm;
-
 	int saved_stdin = dup (STDIN_FILENO);
 	int saved_stdout = dup (STDOUT_FILENO);
-	int saved_stderr = dup (STDERR_FILENO);
 
-	if (forkpty (&fdm, NULL, NULL, NULL) == 0) {
+	int fdm;
+	int pid = forkpty (&fdm, NULL, NULL, NULL);
+	if (in) {
+		dup2 (fdm, STDIN_FILENO);
+	}
+	if (out) {
+		dup2 (fdm, STDOUT_FILENO);
+	}
+
+	if (pid == 0) {
 		// child - program to run
-		struct termios t;
 
 		// necessary because otherwise you can read the same thing you
 		// wrote on fdm.
+		struct termios t;
 		tcgetattr (0, &t);
 		cfmakeraw (&t);
 		tcsetattr (0, TCSANOW, &t);
 
-		if (!in) dup2 (saved_stdin, STDIN_FILENO);
-		if (!out) dup2 (saved_stdout, STDOUT_FILENO);
-		if (!err) dup2 (saved_stderr, STDERR_FILENO);
-		if (saved_stdin != -1) {
-			close (saved_stdin);
-		}
-		if (saved_stdout != -1) {
-			close (saved_stdout);
-		}
-		if (saved_stderr != -1) {
-			close (saved_stderr);
-		}
-		saved_stdin = -1;
-		saved_stdout = -1;
-		saved_stderr = -1;
-		return 0;
+		int code = r_sys_cmd (cmd);
+		restore_saved_fd (saved_stdin, in, STDIN_FILENO);
+		restore_saved_fd (saved_stdout, out, STDOUT_FILENO);
+		exit (code);
 	}
-	// father
-	if (saved_stdin != -1) {
-		close (saved_stdin);
-	}
-	if (saved_stdout != -1) {
-		close (saved_stdout);
-	}
-	if (saved_stderr != -1) {
-		close (saved_stderr);
-	}
-	if (in) dup2 (fdm, STDOUT_FILENO);
-	if (out) dup2 (fdm, STDIN_FILENO);
-	exit (r_sys_cmd (cmd));
+
+	// parent
+	close (saved_stdin);
+	close (saved_stdout);
+	return 0;
 #else
 #warning handle_redirection_proc : unimplemented for this platform
 	return -1;
@@ -342,6 +372,7 @@ R_API int r_run_parseline (RRunProfile *p, char *b) {
 	else if (!strcmp (b, "pidfile")) p->_pidfile = strdup (e);
 	else if (!strcmp (b, "connect")) p->_connect = strdup (e);
 	else if (!strcmp (b, "listen")) p->_listen = strdup (e);
+	else if (!strcmp (b, "pty")) p->_pty = parseBool (e);
 	else if (!strcmp (b, "stdio")) {
 		if (e[0] == '!') {
 			p->_stdio = strdup (e);
@@ -373,16 +404,15 @@ R_API int r_run_parseline (RRunProfile *p, char *b) {
 	else if (!strcmp (b, "setgid")) p->_setgid = strdup (e);
 	else if (!strcmp (b, "setegid")) p->_setegid = strdup (e);
 	else if (!strcmp (b, "nice")) p->_nice = atoi (e);
+	else if (!strcmp (b, "timeout")) p->_timeout = atoi (e);
+	else if (!strcmp (b, "timeoutsig")) p->_timeout_sig = r_signal_from_string (e);
 	else if (!memcmp (b, "arg", 3)) {
 		int n = atoi (b + 3);
 		if (n >= 0 && n < R_RUN_PROFILE_NARGS) {
 			p->_args[n] = getstr (e);
-		} else eprintf ("Out of bounds args index: %d\n", n);
-	} else if (!strcmp (b, "timeout")) {
-		p->_timeout = atoi (e);
-	} else if (!strcmp (b, "timeoutsig")) {
-		// TODO: support non-numeric signal numbers here
-		p->_timeout_sig = atoi (e);
+		} else {
+			eprintf ("Out of bounds args index: %d\n", n);
+		}
 	} else if (!strcmp (b, "envfile")) {
 		char *p, buf[1024];
 		FILE *fd = fopen (e, "r");
@@ -436,8 +466,10 @@ R_API const char *r_run_help() {
 	"# clearenv=true\n"
 	"# envfile=environ.txt\n"
 	"timeout=3\n"
+	"# timeoutsig=SIGTERM # or 15\n"
 	"# connect=localhost:8080\n"
 	"# listen=8080\n"
+	"# pty=false\n"
 	"# fork=true\n"
 	"# bits=32\n"
 	"# pid=0\n"
@@ -463,6 +495,122 @@ R_API const char *r_run_help() {
 	"# setgid=2001\n"
 	"# setegid=2001\n"
 	"# nice=5\n";
+}
+
+#if __UNIX__
+static int fd_forward(int in_fd, int out_fd, char **buff) {
+	int size = 0;
+
+	if (ioctl (in_fd, FIONREAD, &size) == -1) {
+		perror ("ioctl");
+		return -1;
+	}
+	if (!size) { // child process exited or socket is closed
+		return -1;
+	}
+
+	char *new_buff = realloc (*buff, size);
+	if (!new_buff) {
+		eprintf ("Failed to allocate buffer for redirection");
+		return -1;
+	}
+	*buff = new_buff;
+	(void)read (in_fd, *buff, size);
+	if (write (out_fd, *buff, size) != size) {
+		perror ("write");
+		return -1;
+	}
+
+	return 0;
+}
+#endif
+
+static int redirect_socket_to_stdio(RSocket *sock) {
+	close (0);
+	close (1);
+	close (2);
+
+	dup2 (sock->fd, 0);
+	dup2 (sock->fd, 1);
+	dup2 (sock->fd, 2);
+
+	return 0;
+}
+
+static int redirect_socket_to_pty(RSocket *sock) {
+#if HAVE_PTY
+	// directly duplicating the fds using dup2() creates problems
+	// in case of interactive applications
+	int fdm, fds;
+
+	if (openpty (&fdm, &fds, NULL, NULL, NULL) == -1) {
+		perror ("opening pty");
+		return -1;
+	}
+
+	pid_t child_pid = r_sys_fork ();
+
+	if (child_pid == -1) {
+		eprintf ("cannot fork\n");
+		close(fdm);
+		close(fds);
+		return -1;
+	}
+
+	if (child_pid == 0) {
+		// child process
+		close (fds);
+
+		char *buff = NULL;
+		int sockfd = sock->fd;
+		int max_fd = fdm > sockfd ? fdm : sockfd;
+
+		while (true) {
+			fd_set readfds;
+			FD_ZERO (&readfds);
+			FD_SET (fdm, &readfds);
+			FD_SET (sockfd, &readfds);
+
+			if (select (max_fd + 1, &readfds, NULL, NULL, NULL) == -1) {
+				perror ("select error");
+				break;
+			}
+
+			if (FD_ISSET (fdm, &readfds)) {
+				if (fd_forward (fdm, sockfd, &buff) != 0) {
+					break;
+				}
+			}
+
+			if (FD_ISSET (sockfd, &readfds)) {
+				if (fd_forward (sockfd, fdm, &buff) != 0) {
+					break;
+				}
+			}
+		}
+
+		free (buff);
+		close (fdm);
+		r_socket_free (sock);
+		exit (0);
+	}
+
+	// parent
+	r_socket_close_fd (sock);
+	login_tty (fds);
+	close (fdm);
+
+	// disable the echo on slave stdin
+	struct termios t;
+	tcgetattr (0, &t);
+	cfmakeraw (&t);
+	tcsetattr (0, TCSANOW, &t);
+
+	return 0;
+#else
+	// Fallback to socket to I/O redirection
+	return redirect_socket_to_stdio (sock);
+#endif
 }
 
 R_API int r_run_config_env(RRunProfile *p) {
@@ -511,12 +659,15 @@ R_API int r_run_config_env(RRunProfile *p) {
 				return 1;
 			}
 			eprintf ("connected\n");
-			close (0);
-			close (1);
-			close (2);
-			dup2 (fd->fd, 0);
-			dup2 (fd->fd, 1);
-			dup2 (fd->fd, 2);
+			if (p->_pty) {
+				if (redirect_socket_to_pty (fd) != 0) {
+					eprintf ("socket redirection failed\n");
+					r_socket_free (fd);
+					return 1;
+				}
+			} else {
+				redirect_socket_to_stdio (fd);
+			}
 		} else {
 			eprintf ("Invalid format for connect. missing ':'\n");
 			return 1;
@@ -551,12 +702,16 @@ R_API int r_run_config_env(RRunProfile *p) {
 				if (is_child) {
 					r_socket_close_fd (fd);
 					eprintf ("connected\n");
-					close (0);
-					close (1);
-					close (2);
-					dup2 (child->fd, 0);
-					dup2 (child->fd, 1);
-					dup2 (child->fd, 2);
+					if (p->_pty) {
+						if (redirect_socket_to_pty (child) != 0) {
+							eprintf ("socket redirection failed\n");
+							r_socket_free (child);
+							r_socket_free (fd);
+							return 1;
+						}
+					} else {
+						redirect_socket_to_stdio (child);
+					}
 					break;
 				} else {
 					r_socket_close_fd (child);
@@ -593,7 +748,7 @@ R_API int r_run_config_env(RRunProfile *p) {
 			return 1;
 		}
 	}
-#endif
+#else
 	if (p->_chgdir) {
 		ret = chdir (p->_chgdir);
 		if (ret < 0) {
@@ -606,33 +761,29 @@ R_API int r_run_config_env(RRunProfile *p) {
 			return 1;
 		}
 	}
+#endif
 #if __UNIX__
-	if (p->_chroot) {
-		if (chroot (p->_chroot) == 0) {
-			chdir ("/");
-		} else {
-			eprintf ("rarun2: cannot chroot\n");
-			r_sys_perror ("chroot");
+	if (p->_setuid) {
+		ret = setgroups (0, NULL);
+		if (ret < 0) {
+			return 1;
+		}
+		ret = setuid (atoi (p->_setuid));
+		if (ret < 0) {
 			return 1;
 		}
 	}
-	if (p->_setuid) {
-		ret = setgroups (0, NULL);
-		if (ret < 0)
-			return 1;
-		ret = setuid (atoi (p->_setuid));
-		if (ret < 0)
-			return 1;
-	}
 	if (p->_seteuid) {
 		ret = seteuid (atoi (p->_seteuid));
-		if (ret < 0)
+		if (ret < 0) {
 			return 1;
+		}
 	}
 	if (p->_setgid) {
 		ret = setgid (atoi (p->_setgid));
-		if (ret < 0)
+		if (ret < 0) {
 			return 1;
+		}
 	}
 	if (p->_input) {
 		char *inp;

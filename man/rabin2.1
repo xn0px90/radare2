@@ -52,7 +52,7 @@ Select sub-binary architecture. Useful for fat-mach0 binaries
 Force to use that bin plugin (ignore header check)
 .It Fl g
 Show all possible information
-.It Fl g Ar addr
+.It Fl G Ar addr
 Load address . offset to header
 .It Fl h
 Show usage help message.
@@ -132,6 +132,8 @@ RABIN2_LANG same as r2 -e bin.lang for rabin2
 RABIN2_DEMANGLE demangle symbols
 .Pp
 RABIN2_MAXSTRBUF same as r2 -e bin.maxstrbuf for rabin2
+.Pp
+RABIN2_DEBASE64 try to decode all strings as base64 if possible
 .Pp
 RABIN2_STRFILTER same as r2 -e bin.strfilter for rabin2
 .Pp

@@ -55,14 +55,19 @@ static RList* sections(RBinFile* arch) {
 	psxexe_header psxheader;
 	ut64 sz = 0;
 
-	if (!(ret = r_list_new ()))
+	if (!(ret = r_list_new ())) {
 		return NULL;
+	}
 
-	if(!(sect = R_NEW0 (RBinSection)))
-		return ret;
+	if(!(sect = R_NEW0 (RBinSection))) {
+		r_list_free (ret);
+		return NULL;
+	}
 
 	if (r_buf_fread_at (arch->buf, 0, (ut8*)&psxheader, "8c17i", 1) < sizeof (psxexe_header)) {
 		eprintf ("Truncated Header\n");
+		free (sect);
+		r_list_free (ret);
 		return NULL;
 	}
 
@@ -89,14 +94,15 @@ static RList* entries(RBinFile* arch) {
 	if (!(ret = r_list_new ()))
 		return NULL;
 
-	if(!(addr = R_NEW0 (RBinAddr))) {
+	if (!(addr = R_NEW0 (RBinAddr))) {
 		r_list_free (ret);
 		return NULL;
 	}
 
 	if (r_buf_fread_at (arch->buf, 0, (ut8*)&psxheader, "8c17i", 1) < sizeof (psxexe_header)) {
-		eprintf ("Truncated Header\n");
+		eprintf ("PSXEXE Header truncated\n");
 		r_list_free (ret);
+		free (addr);
 		return NULL;
 	}
 
@@ -120,7 +126,7 @@ RBinPlugin r_bin_plugin_psxexe = {
 };
 
 #ifndef CORELIB
-struct r_lib_struct_t radare_plugin = {
+RLibStruct radare_plugin = {
 	.type = R_LIB_TYPE_BIN,
 	.data = &r_bin_plugin_psxexe,
 	.version = R2_VERSION

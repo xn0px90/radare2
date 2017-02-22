@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2014-2016 - Fedor Sakharov */
+/* radare - LGPL - Copyright 2014-2017 - Fedor Sakharov */
 
 #include <r_types.h>
 #include <r_util.h>
@@ -22,15 +22,12 @@ static Sdb* get_sdb(RBinObject *o) {
 }
 
 static void * load_bytes(RBinFile *arch, const ut8 *buf, ut64 sz, ut64 loadaddr, Sdb *sdb) {
-	void *res = NULL;
-	RBuffer *tbuf = NULL;
-
 	if (!buf || !sz || sz == UT64_MAX) {
 		return NULL;
 	}
-	tbuf = r_buf_new();
+	RBuffer *tbuf = r_buf_new();
 	r_buf_set_bytes (tbuf, buf, sz);
-	res = r_bin_coff_new_buf(tbuf);
+	void *res = r_bin_coff_new_buf (tbuf, arch->rbin->verbose);
 	r_buf_free (tbuf);
 	return res;
 }
@@ -59,12 +56,14 @@ static RBinAddr *binsym(RBinFile *arch, int sym) {
 	return NULL;
 }
 
-
 static bool _fill_bin_symbol(struct r_bin_coff_obj *bin, int idx, RBinSymbol **sym) {
 	RBinSymbol *ptr = *sym;
 	char * coffname = NULL;
 	struct coff_symbol *s = NULL;
-	if (idx > bin->hdr.f_nsyms) {
+	if (idx < 0 || idx > bin->hdr.f_nsyms) {
+		return false;
+	}
+	if (!bin->symbols) {
 		return false;
 	}
 	s = &bin->symbols[idx];
@@ -96,8 +95,10 @@ static bool _fill_bin_symbol(struct r_bin_coff_obj *bin, int idx, RBinSymbol **s
 		ptr->type = r_str_const (sdb_fmt (0, "%i", s->n_sclass));
 		break;
 	}
-	if (bin->symbols[idx].n_scnum < bin->hdr.f_nscns) {
-		ptr->paddr = bin->scn_hdrs[s->n_scnum].s_scnptr + s->n_value;
+	if (bin->symbols[idx].n_scnum < bin->hdr.f_nscns &&
+	    bin->symbols[idx].n_scnum > 0) {
+		//first index is 0 that is why -1
+		ptr->paddr = bin->scn_hdrs[s->n_scnum - 1].s_scnptr + s->n_value;
 	}
 	ptr->size = 4;
 	ptr->ordinal = 0;
@@ -117,7 +118,7 @@ static RList *entries(RBinFile *arch) {
 }
 
 static RList *sections(RBinFile *arch) {
-	char *coffname = NULL;
+	char *tmp, *coffname = NULL;
 	size_t i;
 	RList *ret = NULL;
 	RBinSection *ptr = NULL;
@@ -130,11 +131,15 @@ static RList *sections(RBinFile *arch) {
 	if (obj && obj->scn_hdrs) {
 		for (i = 0; i < obj->hdr.f_nscns; i++) {
 			free (coffname);
-			coffname = r_coff_symbol_name (obj, &obj->scn_hdrs[i]);
-			if (!coffname) {
+			tmp = r_coff_symbol_name (obj, &obj->scn_hdrs[i]);
+			if (!tmp) {
 				r_list_free (ret);
 				return NULL;
 			}
+			//IO does not like sections with the same name append idx
+			//since it will update it
+			coffname = r_str_newf ("%s-%d", tmp, i);
+			free (tmp); 
 			ptr = R_NEW0 (RBinSection);
 			if (!ptr) {
 				free (coffname);
@@ -149,13 +154,13 @@ static RList *sections(RBinFile *arch) {
 			ptr->paddr = obj->scn_hdrs[i].s_scnptr;
 			ptr->add = true;
 			ptr->srwx = R_BIN_SCN_MAP;
-			if (obj->scn_hdrs[i].s_flags&COFF_SCN_MEM_READ) {
+			if (obj->scn_hdrs[i].s_flags & COFF_SCN_MEM_READ) {
 				ptr->srwx |= R_BIN_SCN_READABLE;
 			}
-			if (obj->scn_hdrs[i].s_flags&COFF_SCN_MEM_WRITE) {
+			if (obj->scn_hdrs[i].s_flags & COFF_SCN_MEM_WRITE) {
 				ptr->srwx |= R_BIN_SCN_WRITABLE;
 			}
-			if (obj->scn_hdrs[i].s_flags&COFF_SCN_MEM_EXECUTE) {
+			if (obj->scn_hdrs[i].s_flags & COFF_SCN_MEM_EXECUTE) {
 				ptr->srwx |= R_BIN_SCN_EXECUTABLE;
 			}
 			r_list_append (ret, ptr);
@@ -213,7 +218,7 @@ static RList *relocs(RBinFile *arch) {
 			if (size < 0) {
 				return list_rel;
 			}
-			rel = calloc (1, size + 1);
+			rel = calloc (1, size + sizeof (struct coff_reloc));
 			if (!rel) {
 				return list_rel;
 			}
@@ -247,7 +252,7 @@ static RList *relocs(RBinFile *arch) {
 				reloc->vaddr = reloc->paddr;
 				r_list_append (list_rel, reloc);
 			}
-			
+			free (rel);
 		}
 	}
 	return list_rel;

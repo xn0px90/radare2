@@ -29,11 +29,32 @@ R_API void r_sign_ns(RSign *sig, const char *str) {
 	}
 }
 
+static bool signatureExists(RSign *sig, RSignItem *item) {
+	RSignItem *s;
+	RListIter *iter;
+	r_list_foreach (sig->items, iter, s) {
+		if (s->type == item->type) {
+			if (s->name && item->name && !strcmp (s->name, item->name)) {
+				eprintf ("Dupped signature name: '%s'\n", s->name);
+				/* dupped name */
+				return true;
+			}
+			if (s->bytes && item->bytes && item->size== s->size) {
+				if (!memcmp (s->bytes, item->bytes, item->size)) {
+					eprintf ("Dupped byte signature: '%s'\n", s->name);
+					// TODO: check for mask too? or meh
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 R_API bool r_sign_add(RSign *sig, RAnal *anal, int type, const char *name, const char *arg) {
 	int len;
 	char *data = NULL, *ptr;
-	RSignItem *si; // TODO: like in r_search.. we need r_sign_item_new ()
-			// TODO: but..we need to use a pool here..
+	RSignItem *si = NULL;
 	if (!name || !arg || !anal) {
 		return false;
 	}
@@ -51,9 +72,13 @@ R_API bool r_sign_add(RSign *sig, RAnal *anal, int type, const char *name, const
 		// TODO. matching must be done by sym/flag/function name
 		//	sig->addr =
 		}
-		sig->s_func++;
-		if (!r_list_append (sig->items, si)) {
-			r_sign_item_free (si);
+		if (!signatureExists (sig, si)) {
+			if (r_list_append (sig->items, si)) {
+				sig->s_func++;
+			} else {
+				r_sign_item_free (si);
+			}
+			si = NULL;
 		}
 		break;
 	case R_SIGN_HEAD: // function prefix (push ebp..)
@@ -61,35 +86,44 @@ R_API bool r_sign_add(RSign *sig, RAnal *anal, int type, const char *name, const
 	case R_SIGN_BODY: // function body
 		if (!(data = r_anal_strmask (anal, arg))) {
 			r_sign_item_free (si);
+			si = NULL;
 			break;
 		}
-		len = strlen (data)+4; // \xf0
-		si->bytes = (ut8 *)malloc (R_MAX (len, 4));
-		si->mask = (ut8 *)malloc (R_MAX (len, 4));
+		len = strlen (data) + 4; // \xf0
+		si->bytes = (ut8 *)calloc (R_MAX (len, 4), 1);
+		si->mask = (ut8 *)calloc (R_MAX (len, 4), 1);
 		if (!si->bytes || !si->mask) {
 			eprintf ("Cannot malloc\n");
 			r_sign_item_free (si);
+			si = NULL;
 			break;
 		}
 		si->size = r_hex_str2binmask (data, si->bytes, si->mask);
-		if (si->size<1) {
+		if (si->size < 1) {
 			r_sign_item_free (si);
+			si = NULL;
 		} else {
-			r_list_append (sig->items, si);
-			if (type == R_SIGN_HEAD)
-				sig->s_head++;
-			else if (type == R_SIGN_BYTE)
-				sig->s_byte++;
-			else if(type == R_SIGN_BODY)
-				sig->s_func++;
+			if (!signatureExists (sig, si)) {
+				r_list_append (sig->items, si);
+				if (type == R_SIGN_HEAD) {
+					sig->s_head++;
+				} else if (type == R_SIGN_BYTE) {
+					sig->s_byte++;
+				} else if (type == R_SIGN_BODY) {
+					sig->s_func++;
+				}
+				si = NULL;
+			}
 		}
 		break;
 	default:
 	case R_SIGN_ANAL:
 		eprintf ("r_sign_add: TODO. unsupported signature type %d\n", type);
 		r_sign_item_free (si);
+		si = NULL;
 		break;
 	}
+	free (si);
 	free (data);
 	return false;
 }
@@ -99,15 +133,17 @@ R_API void r_sign_list(RSign *sig, int rad, int json) {
 		int i;
 		RListIter *iter;
 		RSignItem *si;
-		if (!r_list_empty (sig->items))
+		if (!r_list_empty (sig->items)) {
 			sig->cb_printf ("zp-\n");
+		}
 		r_list_foreach (sig->items, iter, si) {
 			sig->cb_printf ("z%c %s ", si->type, si->name);
-			for (i=0; i<si->size; i++){
-				if (!si->mask[i]) // This is a mask
+			for (i = 0; i < si->size; i++){
+				if (!si->mask[i]) { // This is a mask
 					sig->cb_printf ("..");
-				else
+				} else {
 					sig->cb_printf ("%02x", si->bytes[i]);
+				}
 			}
 			sig->cb_printf ("\n");
 		}

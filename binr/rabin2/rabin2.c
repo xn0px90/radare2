@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2009-2016 - nibble, pancake */
+/* radare - LGPL - Copyright 2009-2017 - nibble, pancake */
 
 #include <getopt.c>
 #include <r_core.h>
@@ -25,8 +25,8 @@ static ut64 at = 0LL;
 static RLib *l;
 
 static int rabin_show_help(int v) {
-	printf ("Usage: rabin2 [-AcdeEghHiIjlLMqrRsSvVxzZ] [-@ addr] [-a arch] [-b bits]\n"
-		"              [-B addr] [-C F:C:D] [-f str] [-m addr] [-n str] [-N m:M]\n"
+	printf ("Usage: rabin2 [-AcdeEghHiIjlLMqrRsSvVxzZ] [-@ at] [-a arch] [-b bits] [-B addr]\n"
+		"              [-C F:C:D] [-f str] [-m addr] [-n str] [-N m:M] [-P[-P] pdb]\n"
 		"              [-o str] [-O str] [-k query] [-D lang symname] | file\n");
 	if (v) {
 		printf (
@@ -89,6 +89,7 @@ static int rabin_show_help(int v) {
 		" RABIN2_MAXSTRBUF: e bin.maxstrbuf    # specify maximum buffer size\n"
 		" RABIN2_STRFILTER: e bin.strfilter    # r2 -qe bin.strfilter=? -c '' --\n"
 		" RABIN2_STRPURGE:  e bin.strpurge     # try to purge false positives\n"
+		" RABIN2_DEBASE64:  e bin.debase64     # Try to debase64 all strings\n"
 		" RABIN2_DMNGLRCMD: e bin.demanglercmd # try to purge false positives\n"
 		" RABIN2_PREFIX:    e bin.prefix       # prefix symbols/sections/relocs with a specific string\n");
 	}
@@ -100,9 +101,12 @@ static char *stdin_gets() {
 	if (!stdin_buf) {
 		/* XXX: never freed. leaks! */
 		stdin_buf = malloc (STDIN_BUF_SIZE);
+		if (!stdin_buf) {
+			return NULL;
+		}
 	}
 	memset (stdin_buf, 0, STDIN_BUF_SIZE);
-        fgets (stdin_buf, sizeof (stdin_buf) - 1, stdin);
+        fgets (stdin_buf, STDIN_BUF_SIZE - 1, stdin);
 		if (feof (stdin)) {
 			return NULL;
 		}
@@ -134,11 +138,9 @@ static bool isBinopHelp(const char *op) {
 	return false;
 }
 
-static bool extract_binobj(const RBinFile *bf, const RBinXtrData *data, int idx) {
+static bool extract_binobj(const RBinFile *bf, RBinXtrData *data, int idx) {
 	ut64 bin_size = data ? data->size : 0;
 	ut8 *bytes;
-	ut8 *bytes_encoded;
-	//ut64 sz = bf ? r_buf_size (bf->buf) : 0;
 	char *arch = "unknown";
 	int bits = 0;
 	char *libname = NULL;
@@ -159,24 +161,18 @@ static bool extract_binobj(const RBinFile *bf, const RBinXtrData *data, int idx)
 		eprintf ("This is not a fat bin\n");
 		return false;
 	}
-	bytes_encoded = (ut8 *) sdb_get (data->sdb, sdb_fmt (0, "%d", data->offset), 0);
-	bytes = sdb_decode ((const char *)bytes_encoded, NULL);
-	free (bytes_encoded);
-
+	bytes = data->buffer;
 	if (!bytes) {
 		eprintf ("error: BinFile buffer is empty\n");
 		return false;
 	}
-
 	if (!arch) {
 		arch = "unknown";
 	}
 	path = strdup (filename);
-
 	if (!path) {
 		return false;
 	}
-
 	// XXX: Wrong for w32 (/)
 	ptr = strrchr (path, DIRSEP);
 	if (ptr) {
@@ -184,9 +180,7 @@ static bool extract_binobj(const RBinFile *bf, const RBinXtrData *data, int idx)
 	} else {
 		ptr = path;
 	}
-
 	outpath_sz = strlen (path) + 20;
-
 	if (outpath_sz > 0) {
 		outpath = malloc (outpath_sz);
 	}
@@ -216,7 +210,6 @@ static bool extract_binobj(const RBinFile *bf, const RBinXtrData *data, int idx)
 		}
 	}
 
-
 	if (!outfile || !r_file_dump (outfile, bytes, bin_size, 0)) {
 		eprintf ("Error extracting %s\n", outfile);
 		res = false;
@@ -228,8 +221,7 @@ static bool extract_binobj(const RBinFile *bf, const RBinXtrData *data, int idx)
 	free (outfile);
 	free (outpath);
 	free (path);
-	free (bytes);
-
+	R_FREE (data->buffer);
 	return res;
 }
 
@@ -334,7 +326,8 @@ static int rabin_dump_sections(char *scnname) {
 				free (ret);
 				return false;
 			}
-			if (output) {
+			//it does mean the user specified an output file
+			if (strcmp (output, file)) {
 				r_file_dump (output, buf, section->size, 0);
 			} else {
 				r_hex_bin2str (buf, section->size, ret);
@@ -424,7 +417,19 @@ static int rabin_do_operation(const char *op) {
 		RBinFile *cur   = r_bin_cur (bin);
 		RBinPlugin *plg = r_bin_file_cur_plugin (cur);
 		if (!plg) {
-			break;
+			//are we in xtr?
+			if (cur->xtr_data) {
+				//load the first one
+				RBinXtrData *xtr_data = r_list_get_n (cur->xtr_data, 0);
+				if (!r_bin_file_object_new_from_xtr_data (bin, cur,
+						  UT64_MAX, r_bin_get_laddr (bin), xtr_data)) {
+					break;
+				}
+			}
+			plg = r_bin_file_cur_plugin (cur);
+			if (!plg) {
+				break;
+			}
 		}
 		if (plg->signature) {
 			const char *sign = plg->signature (cur);
@@ -499,11 +504,12 @@ static int __lib_bin_xtr_dt(struct r_lib_plugin_t *pl, void *p, void *u) {
 static char *demangleAs(int type) {
 	char *res = NULL;
 	switch (type) {
-	case R_BIN_NM_CXX: res = r_bin_demangle_cxx (file); break;
+	case R_BIN_NM_CXX: res = r_bin_demangle_cxx (NULL, file, 0); break;
 	case R_BIN_NM_JAVA: res = r_bin_demangle_java (file); break;
 	case R_BIN_NM_OBJC: res = r_bin_demangle_objc (NULL, file); break;
 	case R_BIN_NM_SWIFT: res = r_bin_demangle_swift (file, 0); break; // XX: use
-	case R_BIN_NM_MSVC: res = r_bin_demangle_msvc(file); break;
+	case R_BIN_NM_MSVC: res = r_bin_demangle_msvc (file); break;
+	case R_BIN_NM_RUST: res = r_bin_demangle_rust (NULL, file, 0); break;
 	default:
 		eprintf ("Unsupported demangler\n");
 		break;
@@ -525,7 +531,7 @@ int main(int argc, char **argv) {
 	int xtr_idx = 0; // load all files if extraction is necessary.
 	int rawstr = 0;
 	int fd = -1;
-	RCore core;
+	RCore core = {0};
 
 	r_core_init (&core);
 	bin = core.bin;
@@ -574,6 +580,10 @@ int main(int argc, char **argv) {
 	}
 	if ((tmp = r_sys_getenv ("RABIN2_STRPURGE"))) {
 		r_config_set (core.config, "bin.strpurge", tmp);
+		free (tmp);
+	}
+	if ((tmp = r_sys_getenv ("RABIN2_DEBASE64"))) {
+		r_config_set (core.config, "bin.debase64", tmp);
 		free (tmp);
 	}
 
@@ -678,7 +688,8 @@ int main(int argc, char **argv) {
 					"  Resize Section: r/.data/1024\n"
 					"  Remove RPATH: R\n"
 					"  Add Library: a/l/libfoo.dylib\n"
-					"  Change Permissions: p/.data/rwx\n");
+					"  Change Permissions: p/.data/rwx\n"
+					"  Show LDID entitlements: C\n");
 				r_core_fini (&core);
 				return 0;
 			}
@@ -897,17 +908,23 @@ int main(int argc, char **argv) {
 			return 1;
 		}
 	}
-
 	bin->minstrlen = r_config_get_i (core.config, "bin.minstr");
 	bin->maxstrbuf = r_config_get_i (core.config, "bin.maxstrbuf");
 
 	r_bin_force_plugin (bin, forcebin);
 	r_bin_load_filter (bin, action);
 	if (!r_bin_load (bin, file, baddr, laddr, xtr_idx, fd, rawstr)) {
-		eprintf ("r_bin: Cannot open file\n");
-		r_core_fini (&core);
-		return 1;
+		//if this return null means that we did not return a valid bin object
+		//but we have yet the chance that this file is a fat binary
+		if (!bin->cur || !bin->cur->xtr_data) {
+			eprintf ("r_bin: Cannot open file\n");
+			r_core_fini (&core);
+			return 1;
+		}
 	}
+	/* required to automatically select a sub-bin when not specified */
+	(void)r_core_bin_update_arch_bits (&core);
+
 	if (baddr != UT64_MAX) {
 		r_bin_set_baddr (bin, baddr);
 	}
@@ -915,40 +932,10 @@ int main(int argc, char **argv) {
 		rawstr = false;
 		r_bin_dump_strings (core.bin->cur, bin->minstrlen);
 	}
-
 	if (query) {
 		if (rad) {
-// TODO: Should be moved into core, to load those flags and formats into r2
-			Sdb *db = sdb_ns (bin->cur->sdb, "info", 0);
-			char *flagname;
-			if (db) {
-				SdbListIter *iter;
-				SdbKv *kv;
-				printf ("fs format\n");
-				// iterate over all keys
-				ls_foreach (db->ht->list, iter, kv) {
-					char *k = kv->key;
-					char *v = kv->value;
-					char *dup = strdup (k);
-
-					if ((flagname = strstr (dup, ".offset"))) {
-						*flagname = 0;
-						flagname = dup;
-						printf ("f %s @ %s\n", flagname, v);
-					}
-					if ((flagname = strstr (dup, ".cparse"))) {
-						printf ("\"td %s\"\n", v);
-					}
-					if ((flagname = strstr (dup, ".format"))) {
-						*flagname = 0;
-						flagname = dup;
-						printf ("pf.%s %s\n", flagname, v);
-					}
-					free (dup);
-				}
-
-			}
-			//sdb_query (bin->cur->sdb, "info/*");
+			r_core_bin_export_info_rad (&core);
+			r_cons_flush ();
 		} else {
 			if (!strcmp (query, "-")) {
 				__sdb_prompt (bin->cur->sdb);
@@ -1015,7 +1002,7 @@ int main(int argc, char **argv) {
 			r_config_set (core.config, "pdb.server", env_pdbserver);
 		}
 		if (env_useragent && *env_useragent) {
-			r_config_set (core.config, "pdb.user_agent", env_useragent);
+			r_config_set (core.config, "pdb.useragent", env_useragent);
 		}
 		if (env_pdbextract && *env_pdbextract) {
 			r_config_set_i (core.config, "pdb.extract", !(*env_pdbextract == '0'));
@@ -1026,7 +1013,7 @@ int main(int argc, char **argv) {
 		opt.dbg_file = info->debug_file_name;
 		opt.guid = info->guid;
 		opt.symbol_server = (char *)r_config_get (core.config, "pdb.server");
-		opt.user_agent = (char *)r_config_get (core.config, "pdb.user_agent");
+		opt.user_agent = (char *)r_config_get (core.config, "pdb.useragent");
 		opt.path = path;
 		opt.extract = r_config_get_i(core.config, "pdb.extract");
 
@@ -1072,22 +1059,14 @@ int main(int argc, char **argv) {
 		rabin_show_srcline (at);
 	}
 	if (action & R_BIN_REQ_EXTRACT) {
-		RListIter *iter;
-		RBinXtrPlugin *xtr;
-		bool supported = false;
-
-		r_list_foreach (bin->binxtrs, iter, xtr) {
-			if (xtr->check (bin)) {
-				// xtr->extractall (bin);
-				rabin_extract ((!arch && !arch_name && !bits));
-				supported = true;
-				break;
-			}
-		}
-
-		if (!supported) {
-			// if we reach here, no supported xtr plugins found
-			eprintf ("Cannot extract bins from '%s'. No supported plugins found!\n", bin->file);
+		RBinFile *bf = r_bin_cur (bin);
+		if (bf && bf->xtr_data) {
+			rabin_extract ((!arch && !arch_name && !bits));
+		} else {
+			eprintf (
+				"Cannot extract bins from '%s'. No supported "
+				"plugins found!\n",
+				bin->file);
 		}
 	}
 	if (op && action & R_BIN_REQ_OPERATION) {

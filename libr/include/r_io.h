@@ -124,6 +124,7 @@ typedef struct r_io_t {
 	int debug;
 	int raised;
 	int va;
+	bool pava;
 	int raw;
 	int vio; // remove that when vio replaces the old stuff
 	int sectonly;
@@ -160,6 +161,8 @@ typedef struct r_io_t {
 	void *user;
 	int (*cb_core_cmd)(void *user, const char *str);
 	char* (*cb_core_cmdstr)(void *user, const char *str);
+	/* Used for comment generation */
+	void (*cb_core_post_write)(void *user, ut64 maddr, ut8 *orig_bytes, int orig_len);
 	struct r_io_plugin_t *plugin_default;
 } RIO;
 
@@ -170,7 +173,7 @@ typedef struct r_io_plugin_t {
 	char *license;
 	void *widget;
 	int (*listener)(RIODesc *io);
-	int (*init)();
+	int (*init)(void);
 	RIOUndo undo;
 	bool isdbg;
 	// int (*is_file_opened)(RIO *io, RIODesc *fd, const char *);
@@ -293,6 +296,7 @@ R_API int r_io_plugin_generate(RIO *io);
 R_API bool r_io_plugin_add(RIO *io, RIOPlugin *plugin);
 R_API int r_io_plugin_list(RIO *io);
 R_API int r_io_is_listener(RIO *io);
+R_API bool r_io_is_blockdevice(RIO *io);
 
 R_API RIOPlugin *r_io_plugin_byname(RIO *io, const char *name);
 R_API RIOPlugin *r_io_plugin_resolve(RIO *io, const char *filename, bool many);
@@ -386,7 +390,6 @@ R_API void r_io_section_free(void *ptr);
 R_API RIOSection *r_io_section_add(RIO *io, ut64 offset, ut64 vaddr, ut64 size, ut64 vsize, int rwx, const char *name, ut32 bin_id, int fd);
 R_API RIOSection *r_io_section_get_name(RIO *io, const char *name);
 R_API RIOSection *r_io_section_get_i(RIO *io, int idx);
-R_API RIOSection *r_io_section_getv(RIO *io, ut64 vaddr);
 R_API RIOSection *r_io_section_mget_in(RIO *io, ut64 maddr);
 R_API RIOSection *r_io_section_mget_prev(RIO *io, ut64 maddr);
 R_API RIOSection *r_io_section_vget(RIO *io, ut64 addr);

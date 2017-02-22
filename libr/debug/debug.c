@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2009-2016 - pancake, jduck, TheLemonMan, saucec0de */
+/* radare - LGPL - Copyright 2009-2017 - pancake, jduck, TheLemonMan, saucec0de */
 
 #include <r_debug.h>
 #include <r_core.h>
@@ -26,7 +26,6 @@ R_API void r_debug_info_free (RDebugInfo *rdi) {
 	free (rdi->cmdline);
 	free (rdi->libname);
 }
-
 
 /*
  * Recoiling after a breakpoint has two stages:
@@ -288,13 +287,17 @@ static const char *r_debug_str_callback(RNum *userptr, ut64 off, int *ok) {
 
 R_API RDebug *r_debug_new(int hard) {
 	RDebug *dbg = R_NEW0 (RDebug);
-	if (!dbg) return NULL;
+	if (!dbg) {
+		return NULL;
+	}
 	// R_SYS_ARCH
 	dbg->arch = strdup (R_SYS_ARCH);
 	dbg->bits = R_SYS_BITS;
 	dbg->trace_forks = 1;
 	dbg->forked_pid = -1;
 	dbg->trace_clone = 0;
+	dbg->trace_aftersyscall = true;
+	dbg->follow_child = false;
 	R_FREE (dbg->btalgo);
 	dbg->trace_execs = 0;
 	dbg->anal = NULL;
@@ -350,7 +353,7 @@ R_API RDebug *r_debug_free(RDebug *dbg) {
 		r_tree_free (dbg->tree);
 		sdb_foreach (dbg->tracenodes, (SdbForeachCallback)free_tracenodes_entry, dbg);
 		sdb_free (dbg->tracenodes);
-		//r_debug_plugin_free();
+		r_list_free (dbg->plugins);
 		free (dbg->btalgo);
 		r_debug_trace_free (dbg->trace);
 		dbg->trace = NULL;
@@ -367,7 +370,6 @@ R_API int r_debug_attach(RDebug *dbg, int pid) {
 	if (dbg && dbg->h && dbg->h->attach) {
 		ret = dbg->h->attach (dbg, pid);
 		if (ret != -1) {
-			//eprintf ("Attached debugger to pid = %d, tid = %d\n", pid, ret);
 			r_debug_select (dbg, pid, ret); //dbg->pid, dbg->tid);
 		}
 	}
@@ -601,8 +603,11 @@ R_API RDebugReasonType r_debug_wait(RDebug *dbg, RBreakpointItem **bp) {
 			return R_DEBUG_REASON_ERROR;
 		}
 
+		bool libs_bp = (dbg->glob_libs || dbg->glob_unlibs) ? true : false;
 		/* if the underlying stop reason is a breakpoint, call the handlers */
-		if (reason == R_DEBUG_REASON_BREAKPOINT || reason == R_DEBUG_REASON_STEP) {
+		if (reason == R_DEBUG_REASON_BREAKPOINT || reason == R_DEBUG_REASON_STEP || 
+			(libs_bp && 
+			((reason == R_DEBUG_REASON_NEW_LIB) || (reason == R_DEBUG_REASON_EXIT_LIB)))) {
 			RRegItem *pc_ri;
 			RBreakpointItem *b = NULL;
 			ut64 pc;
@@ -638,7 +643,7 @@ R_API RDebugReasonType r_debug_wait(RDebug *dbg, RBreakpointItem **bp) {
 			/* handle signal on continuations here */
 			eprintf ("got signal...\n");
 			int what = r_debug_signal_what (dbg, dbg->reason.signum);
-			const char *name = r_debug_signal_resolve_i (dbg, dbg->reason.signum);
+			const char *name = r_signal_to_string (dbg->reason.signum);
 			if (name && strcmp ("SIGTRAP", name)) {
 				r_cons_printf ("[+] signal %d aka %s received %d\n",
 						dbg->reason.signum, name, what);
@@ -907,9 +912,8 @@ R_API int r_debug_continue_kill(RDebug *dbg, int sig) {
 	if (!dbg) {
 		return false;
 	}
-
 #if __WINDOWS__
-	r_cons_break (w32_break_process, dbg);
+	r_cons_break_push (w32_break_process, dbg);
 #endif
 repeat:
 	if (r_debug_is_dead (dbg)) {
@@ -917,12 +921,14 @@ repeat:
 	}
 	if (dbg->h && dbg->h->cont) {
 		/* handle the stage-2 of breakpoints */
-		if (!r_debug_recoil (dbg, R_DBG_RECOIL_CONTINUE))
+		if (!r_debug_recoil (dbg, R_DBG_RECOIL_CONTINUE)) {
+#if __WINDOWS__
+			r_cons_break_pop ();
+#endif
 			return false;
-
+		}
 		/* tell the inferior to go! */
 		ret = dbg->h->cont (dbg, dbg->pid, dbg->tid, sig);
-
 		//XXX(jjd): why? //dbg->reason.signum = 0;
 
 		reason = r_debug_wait (dbg, &bp);
@@ -930,7 +936,7 @@ repeat:
 			RCore *core = (RCore *)dbg->corebind.core;
 			RNum *num = core->num;
 			if (reason == R_DEBUG_REASON_COND) {
-				if (bp->cond && dbg->corebind.cmd) {
+				if (bp && bp->cond && dbg->corebind.cmd) {
 					dbg->corebind.cmd (dbg->corebind.core, bp->cond);
 				}
 				if (num->value) {
@@ -939,14 +945,23 @@ repeat:
 			}
 		}
 
-
+#if __linux__
+		if (reason == R_DEBUG_REASON_NEW_PID && dbg->follow_child) {
+#if DEBUGGER
+			linux_attach_new_process (dbg);
+#endif
+			goto repeat;
+		}
+#endif
 #if __WINDOWS__
 		if (reason != R_DEBUG_REASON_DEAD) {
 			// XXX(jjd): returning a thread id?!
 			ret = dbg->tid;
 		}
 		if (reason == R_DEBUG_REASON_NEW_LIB ||
-			reason == R_DEBUG_REASON_EXIT_LIB) {
+			reason == R_DEBUG_REASON_EXIT_LIB ||
+			reason == R_DEBUG_REASON_NEW_TID ||
+			reason == R_DEBUG_REASON_EXIT_TID ) {
 			goto repeat;
 		}
 #endif
@@ -954,6 +969,9 @@ repeat:
 		/* if continuing killed the inferior, we won't be able to get
 		 * the registers.. */
 		if (reason == R_DEBUG_REASON_DEAD || r_debug_is_dead (dbg)) {
+#if __WINDOWS__
+			r_cons_break_pop ();
+#endif
 			return false;
 		}
 
@@ -985,7 +1003,7 @@ repeat:
 				dbg->iob.read_at (dbg->iob.io, pc, buf, sizeof (buf));
 				r_anal_op (dbg->anal, &op, pc, buf, sizeof (buf));
 				if (op.size > 0) {
-					const char *signame = r_debug_signal_resolve_i (dbg, dbg->reason.signum);
+					const char *signame = r_signal_to_string (dbg->reason.signum);
 					r_debug_reg_set (dbg, "PC", pc+op.size);
 					eprintf ("Skip signal %d handler %s\n",
 						dbg->reason.signum, signame);
@@ -997,12 +1015,22 @@ repeat:
 			}
 		}
 	}
+#if __WINDOWS__
+	r_cons_break_pop ();
+#endif
 	return ret;
+
 }
 
 R_API int r_debug_continue(RDebug *dbg) {
 	return r_debug_continue_kill (dbg, 0); //dbg->reason.signum);
 }
+
+#if __WINDOWS__ && !__CYGWIN__
+R_API int r_debug_continue_pass_exception(RDebug *dbg) {
+	return r_debug_continue_kill (dbg, DBG_EXCEPTION_NOT_HANDLED);
+}
+#endif
 
 R_API int r_debug_continue_until_nontraced(RDebug *dbg) {
 	eprintf ("TODO\n");
@@ -1140,7 +1168,7 @@ R_API int r_debug_continue_syscalls(RDebug *dbg, int *sc, int n_sc) {
 		eprintf ("--> cannot read registers\n");
 		return -1;
 	}
-	reg = (int)r_debug_reg_get_err (dbg, "SN", &err);
+	reg = (int)r_debug_reg_get_err (dbg, "SN", &err, NULL);
 	if (err) {
 		eprintf ("Cannot find 'sn' register for current arch-os.\n");
 		return -1;
@@ -1206,8 +1234,9 @@ R_API int r_debug_syscall(RDebug *dbg, int num) {
 }
 
 R_API int r_debug_kill(RDebug *dbg, int pid, int tid, int sig) {
-	if (r_debug_is_dead (dbg))
+	if (r_debug_is_dead (dbg)) {
 		return false;
+	}
 	if (dbg->h && dbg->h->kill) {
 		return dbg->h->kill (dbg, pid, tid, sig);
 	}

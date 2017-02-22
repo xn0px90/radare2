@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2013 - pancake */
+/* radare - LGPL - Copyright 2013-2016 - pancake, oddcoder */
 
 #include "r_anal.h"
 
@@ -16,28 +16,57 @@ R_API int r_anal_type_set(RAnal *anal, ut64 at, const char *field, ut64 val) {
 			//int siz = sdb_array_get_num (DB, var, 2, NULL);
 			eprintf ("wv 0x%08"PFMT64x" @ 0x%08"PFMT64x, val, at+off);
 			return true;
-		} else eprintf ("Invalid kind of type\n");
+		}
+		eprintf ("Invalid kind of type\n");
 	}
 	return false;
 }
 
 R_API void r_anal_type_del(RAnal *anal, const char *name) {
-	int n;
-	char *p, str[128], str2[128];
-	Sdb *DB = anal->sdb_types;
-	const char *kind = sdb_const_get (DB, name, 0);
-	snprintf (str, sizeof (str), "%s.%s", kind, name);
-
-#define SDB_FOREACH(x,y,z) for (z = 0; (p = sdb_array_get (x, y, z, NULL)); z++)
-#define SDB_FOREACH_NEXT() free(p)
-	SDB_FOREACH (DB, str, n) {
-		snprintf (str2, sizeof (str2), "%s.%s", str, p);
-		sdb_unset (DB, str2, 0);
-		SDB_FOREACH_NEXT ();
+	Sdb *db = anal->sdb_types;
+	const char *kind = sdb_const_get (db, name, 0);
+	if (!kind) {
+		return;
 	}
-	sdb_set (DB, name, NULL, 0);
-	sdb_unset (DB, name, 0);
-	sdb_unset (DB, str, 0);
+	if (!strcmp (kind, "type")) {
+		sdb_unset (db, sdb_fmt (-1, "type.%s", name), 0);
+		sdb_unset (db, sdb_fmt (-1, "type.%s.size", name), 0);
+		sdb_unset (db, name, 0);
+	} else if (!strcmp (kind, "struct") || !strcmp (kind, "union")) {
+		int i, n = sdb_array_length(db, sdb_fmt (-1, "%s.%s", kind, name));
+		char *elements_key = r_str_newf ("%s.%s", kind, name);
+		for (i = 0; i< n; i++) {
+			char *p = sdb_array_get (db, elements_key, i, NULL);
+			sdb_unset (db, sdb_fmt (-1, "%s.%s", elements_key, p), 0);
+			free (p);
+		}
+		sdb_unset (db, elements_key, 0);
+		sdb_unset (db, name, 0);
+		free (elements_key);
+	} else if (!strcmp (kind, "func")) {
+		int i, n = sdb_num_get (db, sdb_fmt(-1, "func.%s.args", name), 0);
+		for (i = 0; i < n; i++) {
+			sdb_unset (db, sdb_fmt(-1, "func.%s.arg.%d", name, i), 0);
+		}
+		sdb_unset (db, sdb_fmt(-1, "func.%s.ret", name), 0);
+		sdb_unset (db, sdb_fmt(-1, "func.%s.cc", name), 0);
+		sdb_unset (db, sdb_fmt(-1, "func.%s.noreturn", name), 0);
+		sdb_unset (db, sdb_fmt(-1, "func.%s.args", name), 0);
+		sdb_unset (db, name, 0);
+	} else if (!strcmp (kind, "enum")) {
+		int i;
+		for (i=0;; i++) {
+			const char *tmp = sdb_const_get (db, sdb_fmt (-1, "%s.0x%x", name, i), 0);
+			if (!tmp) {
+				break;
+			}
+			sdb_unset (db, sdb_fmt (-1, "%s.%s", name, tmp), 0);
+			sdb_unset (db, sdb_fmt (-1, "%s.0x%x", name, i), 0);			
+		}
+		sdb_unset (db, name, 0);		
+	} else {
+		eprintf ("Unrecognized type \"%s\"\n", kind);
+	}
 }
 
 R_API int r_anal_type_get_size(RAnal *anal, const char *type) {
@@ -58,16 +87,27 @@ R_API int r_anal_type_get_size(RAnal *anal, const char *type) {
 		if (members) {
 			do {
 				char *name = sdb_anext (ptr, &next);
-				query = sdb_fmt (-1, "struct.%s.%s", t, type, name);
+				if (!name) {
+					break;
+				}
+				query = sdb_fmt (-1, "struct.%s.%s", type, name);
 				char *subtype = sdb_get (anal->sdb_types, query, 0);
 				if (!subtype) {
 					break;
 				}
 				char *tmp = strchr (subtype, ',');
 				if (tmp) {
-					*tmp = 0;
+					*tmp++ = 0;
+					tmp = strchr (tmp, ',');
+					if (tmp) {
+						*tmp++ = 0;
+					}
+					int elements = r_num_math (NULL, tmp);
+					if (elements == 0) {
+						elements = 1;
+					}
+					ret += r_anal_type_get_size (anal, subtype) * elements;
 				}
-				ret += r_anal_type_get_size (anal, subtype);
 				free (subtype);
 				ptr = next;
 			} while (next);
@@ -76,12 +116,11 @@ R_API int r_anal_type_get_size(RAnal *anal, const char *type) {
 		return ret;
 	}
 	return 0;
-
 }
 
 R_API RList *r_anal_type_fcn_list(RAnal *anal) {
-	SdbList *sdb_list = sdb_foreach_list (anal->sdb_types);
-	RList *list = r_list_new ();
+	SdbList *sdb_list = sdb_foreach_match (anal->sdb_types, "=^func$", false);
+	RList *list = r_list_newf ((RListFree)r_anal_fcn_free);
 	char *name, *value;
 	const char *key;
 	SdbListIter *sdb_iter;
@@ -90,12 +129,10 @@ R_API RList *r_anal_type_fcn_list(RAnal *anal) {
 
 	if (!list || !sdb_list) {
 		r_list_free (list);
+		ls_free (sdb_list);
 		return 0;
 	}
 	ls_foreach (sdb_list, sdb_iter, kv) {
-		if (strcmp (kv->value, "func")) {
-			continue;
-		}
 		RAnalFunction *fcn = r_anal_fcn_new ();
 		r_list_append (list, fcn);
 		//setting function name and return type
@@ -115,24 +152,28 @@ R_API RList *r_anal_type_fcn_list(RAnal *anal) {
 			continue;
 		}
 		//XXX we should handle as much calling conventions
-		//for as much architectures as we want here as we want here
-		fcn->vars = r_list_new ();
+		//for as much architectures as we want here
+		fcn->vars = r_list_newf ((RListFree)r_anal_var_free);
+		if (!fcn->vars) {
+			continue;
+		}
 		for (i = 0; i < args_n; i++) {
-			RAnalVar *arg = R_NEW0 (RAnalVar);
 			key = r_str_newf ("func.%s.arg.%d", kv->key, i);
 			value = sdb_get (anal->sdb_types, key, 0);
-			name = strstr (value, ",");
-			*name++ = 0;
-			arg->name = strdup (name);
-			arg->type = value;
-			arg->kind = 'a';
-			//TODO Calculate the size and the delta
-			arg->delta = i;
-			r_list_append (fcn->vars, arg);
+			if (value) {
+				name = strstr (value, ",");
+				*name++ = 0;
+				RAnalVar *arg = R_NEW0 (RAnalVar);
+				arg->name = strdup (name);
+				arg->type = value;
+				arg->kind = 'a';
+				//TODO Calculate the size and the delta
+				arg->delta = i;
+				r_list_append (fcn->vars, arg);
+			}
 		}
-
 	}
-	ls_destroy (sdb_list);
+	ls_free (sdb_list);
 	if (r_list_empty (list)) {
 		r_list_free (list);
 		return NULL;
@@ -168,19 +209,16 @@ R_API int r_anal_type_link(RAnal *anal, const char *type, ut64 addr) {
 }
 
 R_API int r_anal_type_unlink(RAnal *anal, ut64 addr) {
-	char *laddr = r_str_newf ("link.%08"PFMT64x, addr);
-	if (!laddr) {
-		return false;
-	}
-	r_anal_type_del(anal, laddr);
-	free (laddr);
+	char *laddr = sdb_fmt (-1, "link.%08"PFMT64x, addr);
+	sdb_unset (anal->sdb_types, laddr, 0);
 	return true;
 }
 
 static void filter_type(char *t) {
 	for (;*t; t++) {
-		if (*t == ' ')
+		if (*t == ' ') {
 			*t = '_';
+		}
 		// memmove (t, t+1, strlen (t));
 	}
 }
@@ -240,8 +278,9 @@ R_API char *r_anal_type_format(RAnal *anal, const char *t) {
 					// special case for char[]. Use char* format type without *
 					if (!strncmp (type, "char", 5) && elements > 0) {
 						tfmt = sdb_const_get (DB, "type.char *", NULL);
-						if (tfmt && *tfmt == '*')
+						if (tfmt && *tfmt == '*') {
 							tfmt++;
+						}
 					} else {
 						if (!strncmp (type, "enum ", 5)) {
 							snprintf (var3, sizeof (var3), "%s", type + 5);
@@ -309,37 +348,71 @@ R_API int r_anal_type_func_args_count(RAnal *anal, const char *func_name) {
 R_API char *r_anal_type_func_args_type(RAnal *anal, const char *func_name, int i) {
 	const char *query = sdb_fmt (-1, "func.%s.arg.%d", func_name, i);
 	char *ret = sdb_get (anal->sdb_types, query, 0);
-	char *comma = strchr (ret, ',');
-	if (comma) {
-		*comma = 0;
-		return ret;
+	if (ret) {
+		char *comma = strchr (ret, ',');
+		if (comma) {
+			*comma = 0;
+			return ret;
+		}
+		free (ret);
 	}
-	free (ret);
 	return NULL;
 }
 
 R_API char *r_anal_type_func_args_name(RAnal *anal, const char *func_name, int i) {
 	const char *query = sdb_fmt (-1, "func.%s.arg.%d", func_name, i);
 	const char *get = sdb_const_get (anal->sdb_types, query, 0);
-	char *ret = strchr (get, ',');
-	return ret == 0 ? ret : ret + 1;
-}
-static int capture_sub_string (void *p, const char *k, const char *v) {
-	char **ret = (char **)p;
-	if (strcmp (v, "func")) {
-		return 1;
+	if (get) {
+		char *ret = strchr (get, ',');
+		return ret == 0 ? ret : ret + 1;
 	}
-	if (strstr (ret[1], k) && (!ret[0] || strlen(k) > strlen (ret[0]))) {
-		free (ret[0]);
-		ret[0] = strdup (k);
-	}
-	return 1;
+	return NULL;
 }
+
+#define MIN_MATCH_LEN 4
+
+// TODO: Future optimizations
+// - symbol names are long and noisy, reduce searchspace for match here
+//   by preprocessing to delete noise, as much as we can.
+// - We ignore all func.*, but thats maybe most of sdb entries
+//   could maybe eliminate this work (strcmp).
 R_API char *r_anal_type_func_guess(RAnal *anal, char *func_name) {
-	char *ret[] = {
-		NULL,
-		func_name
-	};
-	sdb_foreach (anal->sdb_types, capture_sub_string, ret);
-	return ret[0];
+	int j = 0, offset = 0, n;
+	char *str = func_name;
+
+	if (!func_name) {
+		return NULL;
+	}
+
+	size_t slen = strlen (str);
+	if (slen < MIN_MATCH_LEN) {
+		return NULL;
+	}
+
+	if(slen > 4) { // were name-matching so ignore autonamed
+		if ((str[0] == 'f' && str[1] == 'c' && str[2] == 'n' && str[3] == '.') ||
+			(str[0] == 'l' && str[1] == 'o' && str[2] == 'c' && str[3] == '.') ) {
+			return NULL;
+		}
+	}
+	while(slen > 4 &&  str[offset+3] == '.') { // strip r2 prefixes (sym, sym.imp, etc')
+		offset+=4;
+	}
+	slen -= offset;
+	str = strdup (&func_name[offset]);
+	for (n = slen; n >= MIN_MATCH_LEN; --n) {
+		for (j = 0; j < slen - (n - 1); ++j) {
+			char saved = str[j + n];
+			str[j + n] = 0;
+			if (sdb_exists (anal->sdb_types, &str[j])) {
+				const char *res = sdb_const_get (anal->sdb_types, &str[j], 0);
+				bool is_func = res && !strcmp ("func", res);
+				if (is_func) {
+					return strdup (&str[j]);
+				}
+			}
+			str[j + n] = saved;
+		}
+	}
+	return NULL;
 }

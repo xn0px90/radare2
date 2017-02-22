@@ -27,9 +27,9 @@ static void * load_bytes(RBinFile *arch, const ut8 *buf, ut64 sz, ut64 loadaddr,
 	if (!buf || !sz || sz == UT64_MAX) {
 		return NULL;
 	}
-	tbuf = r_buf_new();
+	tbuf = r_buf_new ();
 	r_buf_set_bytes (tbuf, buf, sz);
-	res = PE_(r_bin_pe_new_buf) (tbuf);
+	res = PE_(r_bin_pe_new_buf) (tbuf, arch->rbin->verbose);
 	if (res) {
 		sdb_ns_set (sdb, "info", res->kv);
 	}
@@ -80,7 +80,7 @@ static RBinAddr* binsym(RBinFile *arch, int type) {
 }
 
 static void add_tls_callbacks(RBinFile *arch, RList* list) {
-	PE_DWord paddr, vaddr;
+	PE_DWord paddr, vaddr, haddr;
 	int count = 0;
 	RBinAddr *ptr = NULL;
 	struct PE_(r_bin_pe_obj_t) *bin = (struct PE_(r_bin_pe_obj_t) *) (arch->o->bin_obj);
@@ -98,9 +98,16 @@ static void add_tls_callbacks(RBinFile *arch, RList* list) {
 		if (!vaddr) {
 			break;
 		}
+
+		key =  sdb_fmt (0, "pe.tls_callback%d_haddr", count);
+		haddr = sdb_num_get (bin->kv, key, 0);
+		if (!haddr) {
+			break;
+		}
 		if ((ptr = R_NEW0 (RBinAddr))) {
 			ptr->paddr = paddr;
 			ptr->vaddr = vaddr;
+			ptr->haddr = haddr;
 			ptr->type  = R_BIN_ENTRY_TYPE_TLS;
 			r_list_append (list, ptr);
 		}
@@ -122,6 +129,7 @@ static RList* entries(RBinFile *arch) {
 	if ((ptr = R_NEW0 (RBinAddr))) {
 		ptr->paddr = entry->paddr;
 		ptr->vaddr = entry->vaddr;
+		ptr->haddr = entry->haddr;
 		ptr->type  = R_BIN_ENTRY_TYPE_PROGRAM;
 		r_list_append (ret, ptr);
 	}
@@ -309,7 +317,12 @@ static RList* imports(RBinFile *arch) {
 		rel->additive = 0;
 		rel->import = ptr;
 		rel->addend = 0;
-		rel->vaddr = imports[i].vaddr;
+		{
+			ut8 addr[4];
+			r_buf_read_at (arch->buf, imports[i].paddr, addr, 4);
+			ut64 newaddr = r_read_le32 (&addr);
+			rel->vaddr = newaddr;
+		}
 		rel->paddr = imports[i].paddr;
 		r_list_append (relocs, rel);
 	}
@@ -600,6 +613,15 @@ static RBuffer* create(RBin* bin, const ut8 *code, int codelen, const ut8 *data,
 	return buf;
 }
 
+static char *signature (RBinFile *arch) {
+	struct PE_ (r_bin_pe_obj_t) * bin;
+	if (!arch || !arch->o || !arch->o->bin_obj) {
+		return NULL;
+	}
+	bin = arch->o->bin_obj;
+	return (char *) bin->pkcs7;
+}
+
 struct r_bin_plugin_t r_bin_plugin_pe = {
 	.name = "pe",
 	.desc = "PE bin plugin",
@@ -614,6 +636,7 @@ struct r_bin_plugin_t r_bin_plugin_pe = {
 	.binsym = &binsym,
 	.entries = &entries,
 	.sections = &sections,
+	.signature = &signature,
 	.symbols = &symbols,
 	.imports = &imports,
 	.info = &info,

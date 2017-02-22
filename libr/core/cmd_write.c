@@ -289,6 +289,7 @@ static void cmd_write_value (RCore *core, const char *input) {
 	ut64 off = 0LL;
 	ut8 buf[sizeof(ut64)];
 	int wseek = r_config_get_i (core->config, "cfg.wseek");
+	bool be = r_config_get_i (core->config, "cfg.bigendian");
 
 	if (!input)
 		return;
@@ -328,17 +329,17 @@ static void cmd_write_value (RCore *core, const char *input) {
 		WSEEK (core, 1);
 		break;
 	case 2:
-		r_write_le16 (buf, (ut16)(off & UT16_MAX));
+		r_write_ble16 (buf, (ut16)(off & UT16_MAX), be);
 		r_io_write (core->io, buf, 2);
 		WSEEK (core, 2);
 		break;
 	case 4:
-		r_write_le32 (buf, (ut32)(off & UT32_MAX));
+		r_write_ble32 (buf, (ut32)(off & UT32_MAX), be);
 		r_io_write (core->io, buf, 4);
 		WSEEK (core, 4);
 		break;
 	case 8:
-		r_write_le64 (buf, off);
+		r_write_ble64 (buf, off, be);
 		r_io_write (core->io, buf, 8);
 		WSEEK (core, 8);
 		break;
@@ -410,22 +411,22 @@ static int cmd_write(void *data, const char *input) {
 		"w6","[de] base64/hex","write base64 [d]ecoded or [e]ncoded string",
 		"wa","[?] push ebp","write opcode, separated by ';' (use '\"' around the command)",
 		"waf"," file","assemble file and write bytes",
-		"wao"," op","modify opcode (change conditional of jump. nop, etc)",
-		"wA"," r 0","alter/modify opcode at current seek (see wA?)",
+		"wao"," [?] op","modify opcode (change conditional of jump. nop, etc)",
+		"wA"," [?] r 0","alter/modify opcode at current seek (see wA?)",
 		"wb"," 010203","fill current block with cyclic hexpairs",
 		"wB","[-]0xVALUE","set or unset bits with given value",
 		"wc","","list all write changes",
 		"wc","[?][ir*?]","write cache undo/commit/reset/list (io.cache)",
 		"wd"," [off] [n]","duplicate N bytes from offset at current seek (memcpy) (see y?)",
-		"we","[nNsxX] [arg]","extend write operations (insert instead of replace)",
+		"we","[?] [nNsxX] [arg]","extend write operations (insert instead of replace)",
 		"wf"," -|file","write contents of file at current offset",
 		"wh"," r2","whereis/which shell command",
 		"wm"," f0ff","set binary mask hexpair to be used as cyclic write mask",
 		"wo","[?] hex","write in block with operation. 'wo?' fmi",
-		"wp"," -|file","apply radare patch file. See wp? fmi",
+		"wp"," [?] -|file","apply radare patch file. See wp? fmi",
 		"wr"," 10","write 10 random bytes",
 		"ws"," pstring","write 1 byte for length and then the string",
-		"wt[f]"," file [sz]","write to file (from current seek, blocksize or sz bytes)",
+		"wt[f]"," [?] file [sz]","write to file (from current seek, blocksize or sz bytes)",
 		"wts"," host:port [sz]", "send data to remote host:port via tcp://",
 		"ww"," foobar","write wide string 'f\\x00o\\x00o\\x00b\\x00a\\x00r\\x00'",
 		"wx","[?][fs] 9090","write two intel nops (from wxfile or wxseek)",
@@ -492,8 +493,8 @@ static int cmd_write(void *data, const char *input) {
 	case '6':
 		{
 		int fail = 0;
-		ut8 *buf;
-		int len, str_len;
+		ut8 *buf = NULL;
+		int len = 0, str_len;
 		const char *str;
 
 		if (input[1] && input[2] != ' ')
@@ -972,24 +973,35 @@ static int cmd_write(void *data, const char *input) {
 				eprintf ("Usage wts host:port [sz]\n");
 			}
 		} else if (*str == '?' || *str == '\0') {
-			eprintf ("Usage: wt[a] file [size]   write 'size' bytes in current block to file\n");
+			const char* help_msg[] = {
+				"Usage:", "wt[a] file [size]", " Write 'size' bytes in current blok to 'file'",
+				"wta", " [filename]", "append to 'filename'",
+				"wtf", " [filename] [size]", "write to file (see also 'wxf' and 'wf?')",
+				"wtf!", " [filename]", "write to file from current addresss to eof",
+				NULL};
+			r_core_cmd_help (core, help_msg);
 			free (ostr);
 			return 0;
 		} else {
-			int append = 0;
+			bool append = false;
+			bool toend = false;
 			st64 sz = core->blocksize;
 			if (*str == 'f') { // "wtf"
 				str++;
-				if (*str && str[1]) {
-					filename = str + 1;
+				if (*str == '!') {
+					toend = true;
+					str++;
+				}
+				if (*str) {
+					filename = str + ((*str == ' ')? 1: 0);
 				} else {
 					filename = "";
 				}
 			} else if (*str=='a') { // "wta"
 				append = 1;
 				str++;
-				if (str[0]==' ') {
-					filename = str+1;
+				if (str[0] == ' ') {
+					filename = str + 1;
 				} else {
 					const char* prefix = r_config_get (core->config, "cfg.prefixdump");
 					snprintf (_fn, sizeof (_fn), "%s.0x%08"PFMT64x, prefix, core->offset);
@@ -997,28 +1009,42 @@ static int cmd_write(void *data, const char *input) {
 				}
 			} else if (*str != ' ') {
 				const char* prefix = r_config_get (core->config, "cfg.prefixdump");
-				snprintf (_fn, sizeof(_fn), "%s.0x%08"PFMT64x, prefix, core->offset);
+				snprintf (_fn, sizeof (_fn), "%s.0x%08"PFMT64x, prefix, core->offset);
 				filename = _fn;
 			} else {
 				filename = str + 1;
 			}
 			tmp = strchr (str + 1, ' ');
+			if (!filename || !*filename) {
+				const char* prefix = r_config_get (core->config, "cfg.prefixdump");
+				snprintf (_fn, sizeof (_fn), "%s.0x%08"PFMT64x, prefix, core->offset);
+				filename = _fn;
+			}
 			if (tmp) {
-				sz = (st64) r_num_math (core->num, tmp + 1);
-				if (!sz) {
-					sz = core->blocksize;
+				if (toend) {
+					sz = r_io_desc_size (core->io, core->file->desc) - core->offset;
+				} else {
+					sz = (st64) r_num_math (core->num, tmp + 1);
+					if (!sz) {
+						sz = core->blocksize;
+					}
+					*tmp = 0;
 				}
-				*tmp = 0;
 				if (sz < 1) {
 					eprintf ("Invalid length\n");
 				} else {
 					r_core_dump (core, filename, core->offset, (ut64)sz, append);
 				}
 			} else {
-				if (!r_file_dump (filename, core->block, core->blocksize, append)) {
-					sz = 0;
+				if (toend) {
+					sz = r_io_desc_size (core->io, core->file->desc) - core->offset;
+					r_core_dump (core, filename, core->offset, (ut64)sz, append);
 				} else {
-					sz = core->blocksize;
+					if (!r_file_dump (filename, core->block, core->blocksize, append)) {
+						sz = 0;
+					} else {
+						sz = core->blocksize;
+					}
 				}
 			}
 			eprintf ("Dumped %"PFMT64d" bytes from 0x%08"PFMT64x" into %s\n",
@@ -1047,7 +1073,7 @@ static int cmd_write(void *data, const char *input) {
 			eprintf ("Cannot malloc %d\n", len);
 		}
 		break;
-	case 'x':
+	case 'x': // "wx"
 		switch (input[1]) {
 		case 'f': // "wxf"
 			arg = (const char *)(input + ((input[2]==' ')? 3: 2));
@@ -1069,15 +1095,21 @@ static int cmd_write(void *data, const char *input) {
 					}
 					free (in);
 				}
-			} else if ((buf = r_file_slurp_hexpairs (arg, &size))) {
-				r_io_use_desc (core->io, core->file->desc);
-				if (r_io_write_at (core->io, core->offset, buf, size) > 0) {
-					core->num->value = size;
-					WSEEK (core, size);
+			} else if (r_file_exists (arg)) {
+				if ((buf = r_file_slurp_hexpairs (arg, &size))) {
+					r_io_use_desc (core->io, core->file->desc);
+					if (r_io_write_at (core->io, core->offset, buf, size) > 0) {
+						core->num->value = size;
+						WSEEK (core, size);
+					}
+					free (buf);
+					r_core_block_read (core);
+				} else {
+					eprintf ("This file doesnt contains hexpairs\n");
 				}
-				free (buf);
-				r_core_block_read (core);
-			} else eprintf ("Cannot open file '%s'\n", arg);
+			} else {
+				eprintf ("Cannot open file '%s'\n", arg);
+			}
 			break;
 		case 's': // "wxs"
 			{
@@ -1106,7 +1138,7 @@ static int cmd_write(void *data, const char *input) {
 			}
 		}
 		break;
-	case 'a':
+	case 'a': // "wa"
 		switch (input[1]) {
 		case 'o': // "wao"
 			if (input[2] == ' ')

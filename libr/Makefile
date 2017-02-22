@@ -13,7 +13,7 @@ PWD=$(shell pwd)
 
 LIBS0=util hash
 LIBS1=socket reg cons magic bp search config
-LIBS2=syscall lang io crypto flags
+LIBS2=syscall lang io crypto flag
 LIBS3=fs anal bin
 LIBS4=parse
 LIBS5=asm debug
@@ -40,16 +40,25 @@ endif
 # looks hacky :D
 #AR=arm-linux-androideabi-ar
 
+S=$
+B=`
 libr.a:
 	rm -rf .libr
 	mkdir .libr
 	for FILE in */libr_*.a ../shlr/*/*.a ; do \
-		mkdir -p .libr/$$FILE ; \
-		cp -f $$FILE .libr/$$FILE ; \
-		(cd .libr/$$FILE ; ${AR} x *.a ; rm -f *.a ) ; \
-		done
-	cd .libr ; ${AR} qv libr.a `find * -iname *.o`
+		F=${B}basename $$FILE${B} ; \
+		Q=${B}dirname $$FILE${B} ; \
+		D=${B}basename $$Q${B} ; \
+		mkdir -p .libr/$$D ; \
+		cp -f $$FILE .libr/$$D/$$F ; \
+		ls -l .libr/$$D/$$F ; \
+		(cd .libr/$$D && ${AR} x $$F || true ) ; \
+	done
+	echo lets ar
+	cd .libr ; ${AR} qv libr.a `find * -iname *.o 2> /dev/null`
+	echo lets m
 	mv .libr/libr.a libr.a
+	echo ranlibin
 	${RANLIB} libr.a
 	rm -rf .libr
 
@@ -142,15 +151,15 @@ install: install-includes install-pkgconfig
 	# TODO :Use INSTALL_DATA_DIR instead of mkdir
 	# libraries
 	@${INSTALL_DIR} "${DESTDIR}${LIBDIR}"
-	@$(foreach lib,$(shell find * -type f | grep -e '\.${EXT_SO}$$' | grep -Ev '(lib|parse)/t/' | grep lib | grep -v /bin/ | grep -v /p/), \
+	@$(foreach lib,$(shell find * -type f -iname "*.${EXT_SO}" | grep -v '(lib|parse)/t/' | grep lib | grep -v /bin/ | grep -v /p/), \
 	  echo " ${DESTDIR}${LIBDIR}/$(call libpath-to-name-version,$(lib),${LIBVERSION})"; \
 	  rm -f "${DESTDIR}${LIBDIR}/$(call libpath-to-name-version,$(lib),${LIBVERSION})"; \
 	  ${INSTALL_LIB} "$(lib)" "${DESTDIR}${LIBDIR}/$(call libpath-to-name-version,$(lib),${LIBVERSION})"; \
 	  ( cd "${DESTDIR}${LIBDIR}" ; ln -fs "$(call libpath-to-name-version,$(lib),${LIBVERSION})" "$(call libpath-to-name,$(lib))" ) ; \
 	)
 	# object archives
-	@for FILE in `find * -type f | grep -e '\.a$$' | grep -v fs/p` ; do \
-	  echo " ${DESTDIR}${LIBDIR}/$$FILE"; ${INSTALL_DATA} $$FILE "${DESTDIR}${LIBDIR}" ; done
+	@for FILE in `find * -type f -iname "*.a" | grep -v fs/p` ; do \
+	  echo " ${DESTDIR}${LIBDIR}/$$FILE"; ${INSTALL_DATA} $$FILE "${DESTDIR}${LIBDIR}" ; done || true
 	# plugins
 	@${INSTALL_DIR} "${DESTDIR}${LIBDIR}/radare2/${VERSION}"
 	@for FILE in `find */p -perm -u+x -type f | grep -v exe | grep -v dll | grep ${EXT_SO}`; \

@@ -9,7 +9,6 @@
 #include <r_regex.h>
 #include <r_list.h> // radare linked list
 #include <r_flist.h> // radare fixed pointer array iterators
-#include <list.h> // kernel linked list
 #include <r_th.h>
 #include <dirent.h>
 #include <sys/time.h>
@@ -34,6 +33,7 @@
 #include "r_util/r_queue.h"
 #include "r_util/r_range.h"
 #include "r_util/r_sandbox.h"
+#include "r_util/r_signal.h"
 #include "r_util/r_spaces.h"
 #include "r_util/r_stack.h"
 #include "r_util/r_str.h"
@@ -44,6 +44,10 @@
 #include "r_util/r_tree.h"
 #include "r_util/r_uleb128.h"
 #include "r_util/r_utf8.h"
+#include "r_util/r_id_storage.h"
+#include "r_util/r_asn1.h"
+#include "r_util/r_x509.h"
+#include "r_util/r_pkcs7.h"
 #if __UNIX__
 #include <signal.h>
 #endif

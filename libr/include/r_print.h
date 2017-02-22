@@ -20,10 +20,14 @@ extern "C" {
 #define R_PRINT_FLAGS_OFFSET  0x00000040
 #define R_PRINT_FLAGS_REFS    0x00000080
 #define R_PRINT_FLAGS_DIFFOUT 0x00000100 /* only show different rows in `cc` hexdiffing */
+#define R_PRINT_FLAGS_ADDRDEC 0x00000200
+#define R_PRINT_FLAGS_COMMENT 0x00000400
+#define R_PRINT_FLAGS_COMPACT 0x00000800
 
 typedef int (*RPrintZoomCallback)(void *user, int mode, ut64 addr, ut8 *bufz, ut64 size);
 typedef const char *(*RPrintNameCallback)(void *user, ut64 addr);
-typedef const char *(*RPrintColorFor)(void *user, ut64 addr);
+typedef const char *(*RPrintCommentCallback)(void *user, ut64 addr);
+typedef const char *(*RPrintColorFor)(void *user, ut64 addr, bool verbose);
 
 typedef struct r_print_zoom_t {
 	ut8 *buf;
@@ -39,9 +43,9 @@ typedef struct r_print_t {
 	char datefmt[32];
 	int datezone;
 	int (*write)(const unsigned char *buf, int len);
-	int (*cb_printf)(const char *str, ...);
+	void (*cb_printf)(const char *str, ...);
 	int (*disasm)(void *p, ut64 addr);
-	int (*oprintf)(const char *str, ...);
+	void (*oprintf)(const char *str, ...);
 	char* (*get_bitfield)(void *user, const char *name, ut64 value);
 	char* (*get_enumname)(void *user, const char *name, ut64 value);
 	int interrupt;
@@ -58,6 +62,7 @@ typedef struct r_print_t {
 	int ocur;
 	int cols;
 	int flags;
+	bool use_comments;
 	int addrmod;
 	int col;
 	int stride;
@@ -67,6 +72,7 @@ typedef struct r_print_t {
 	RPrintNameCallback offname;
 	RPrintColorFor colorfor;
 	RPrintColorFor hasrefs;
+	RPrintCommentCallback get_comments;
 	RStrHT *formats;
 	RCons *cons;
 	RConsBind consbind;
@@ -99,7 +105,7 @@ R_API void r_print_set_interrupt(int i);
 R_API char *r_print_hexpair(RPrint *p, const char *str, int idx);
 R_API RPrint *r_print_new(void);
 R_API RPrint *r_print_free(RPrint *p);
-R_API int r_print_mute(RPrint *p, int x);
+R_API bool r_print_mute(RPrint *p, int x);
 R_API void r_print_set_flags(RPrint *p, int _flags);
 R_API void r_print_unset_flags(RPrint *p, int flags);
 R_API void r_print_addr(RPrint *p, ut64 addr);
@@ -132,7 +138,7 @@ R_API void r_print_code(RPrint *p, ut64 addr, ut8 *buf, int len, char lang);
 R_API int r_print_format_struct_size(const char *format, RPrint *p, int mode);
 R_API int r_print_format(RPrint *p, ut64 seek, const ut8* buf, const int len, const char *fmt, int elem, const char *setval, char *field);
 R_API int r_print_format_length(const char *fmt);
-R_API void r_print_offset(RPrint *p, ut64 off, int invert, int opt, int delta, const char *label);
+R_API void r_print_offset(RPrint *p, ut64 off, int invert, int opt, int dec, int delta, const char *label);
 #define R_PRINT_STRING_WIDE 1
 #define R_PRINT_STRING_ZEROEND 2
 #define R_PRINT_STRING_URLENCODE 4
@@ -143,6 +149,7 @@ R_API int r_print_date_unix(RPrint *p, const ut8 *buf, int len);
 R_API int r_print_date_get_now(RPrint *p, char *str);
 R_API void r_print_zoom(RPrint *p, void *user, RPrintZoomCallback cb, ut64 from, ut64 to, int len, int maxlen);
 R_API void r_print_progressbar(RPrint *pr, int pc, int _cols);
+R_API void r_print_rangebar(RPrint *p, ut64 startA, ut64 endA, ut64 min, ut64 max, int cols);
 R_API char * r_print_randomart(const ut8 *dgst_raw, ut32 dgst_raw_len, ut64 addr);
 R_API void r_print_2bpp_row(RPrint *p, ut8 *buf);
 R_API void r_print_2bpp_tiles(RPrint *p, ut8 *buf, ut32 tiles);
@@ -161,6 +168,7 @@ R_API char *r_print_stereogram(const char *bump, int w, int h);
 R_API void r_print_stereogram_print(RPrint *p, const char *buf);
 R_API void r_print_set_screenbounds(RPrint *p, ut64 addr);
 R_API int r_util_lines_getline(ut64 *lines_cache, int lines_cache_sz, ut64 off);
+R_API char* r_print_json_indent(const char* s, bool color);
 
 #endif
 

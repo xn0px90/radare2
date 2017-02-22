@@ -21,7 +21,9 @@ static RIO *r_io_bind_get_io(RIOBind *bnd);
 
 R_API RIO *r_io_new() {
 	RIO *io = R_NEW0 (RIO);
-	if (!io) return NULL;
+	if (!io) {
+		return NULL;
+	}
 	io->buffer = r_cache_new (); // RCache is a list of ranged buffers. maybe rename?
 	io->write_mask_fd = -1;
 	io->cb_printf = (void *)printf;
@@ -29,6 +31,7 @@ R_API RIO *r_io_new() {
 	io->ff = true;
 	io->Oxff = 0xff;
 	io->aslr = 0;
+	io->pava = false;
 	io->raised = -1;
 	io->autofd = true;
 	r_io_map_init (io);
@@ -76,7 +79,10 @@ R_API int r_io_write_buf(RIO *io, struct r_buf_t *b) {
 }
 
 R_API RIO *r_io_free(RIO *io) {
-	if (!io) return NULL;
+	if (!io) {
+		return NULL;
+	}
+	R_FREE (io->plugin_default);
 	r_list_free (io->plugins);
 	r_list_free (io->sections);
 	r_list_free (io->maps);
@@ -275,7 +281,7 @@ R_API int r_io_reopen(RIO *io, RIODesc *desc, int flags, int mode) {
 }
 
 R_API int r_io_use_desc(RIO *io, RIODesc *d) {
-	if (d) {
+	if (io && d && d->plugin) {
 		io->desc = d;
 		io->plugin = d->plugin;
 		return true;
@@ -331,9 +337,11 @@ R_API int r_io_read(RIO *io, ut8 *buf, int len) {
 	if (!io || !io->desc || !buf || io->off == UT64_MAX)
 		return -1;
 	/* IGNORE check section permissions */
-	if (io->enforce_rwx & R_IO_READ)
-		if (!(r_io_section_get_rwx (io, io->off) & R_IO_READ))
+	if (io->enforce_rwx & R_IO_READ) {
+		if (!(r_io_section_get_rwx (io, io->off) & R_IO_READ)) {
 			return -1;
+		}
+	}
 	/* io->off is in maddr, but r_io_read_at works in vaddr
 	 * FIXME: in some cases, r_io_seek sets io->off in vaddr */
 	ut64 vaddr = r_io_section_maddr_to_vaddr(io, io->off);
@@ -395,7 +403,9 @@ R_API int r_io_read_at(RIO *io, ut64 addr, ut8 *buf, int len) {
 			} else {
 				next = 0;
 			}
-			if (!next) return 0;
+			if (!next) {
+				return 0;
+			}
 		}
 	}
 
@@ -568,6 +578,20 @@ R_API ut64 r_io_read_i(RIO *io, ut64 addr, int sz) {
 	return ret;
 }
 
+/* Same as r_io_read_at, but not consume bytes */
+R_API int r_io_peek_at(RIO *io, const ut64 addr, ut8 *buf, const int sz) {
+	int ret = -1, tmp_ret = -1;
+	ret = r_io_seek (io, addr, R_IO_SEEK_SET);
+	if (ret != -1) {
+		ret = r_io_read (io, buf, sz);
+	}
+	if (ret != -1) {
+		tmp_ret = r_io_seek (io, addr, R_IO_SEEK_SET);
+	}
+	if (tmp_ret == -1) ret = tmp_ret;
+	return ret;
+}
+
 // TODO. this is a physical resize
 R_API bool r_io_resize(RIO *io, ut64 newsize) {
 	if (io->plugin) {
@@ -588,12 +612,19 @@ R_API int r_io_extend(RIO *io, ut64 size) {
 	ut64 cur_size = r_io_size (io), tmp_size = cur_size - size;
 	ut8 *buffer = NULL;
 
-	if (!size) return false;
-
-	if (io->plugin && io->plugin->extend)
+	if (!size) {
+		return false;
+	}
+	if (io->plugin && io->plugin->extend) {
 		return io->plugin->extend (io, io->desc, size);
-
-	if (!r_io_resize (io, size + cur_size)) return false;
+	}
+	if (!UT64_ADD_OVFCHK (size, cur_size)) {
+		if (!r_io_resize (io, size + cur_size)) {
+			return false;
+		}
+	} else {
+		return false;
+	}
 
 	if (cur_size < size) {
 		tmp_size = size - cur_size;
@@ -641,20 +672,34 @@ R_API int r_io_set_write_mask(RIO *io, const ut8 *buf, int len) {
 }
 
 R_API int r_io_write(RIO *io, const ut8 *buf, int len) {
-	int i, ret = -1;
-	ut8 *data = NULL;
+	ut64 maddr = io->off;
+	int i, ret = -1, orig_len = 0;
+	ut8 *data = NULL, *orig_bytes = NULL;
 
 	/* check section permissions */
 	if (io->enforce_rwx & R_IO_WRITE) {
 		if (!(r_io_section_get_rwx (io, io->off) & R_IO_WRITE)) {
-			return -1;
+			ret = -1;
+			goto cleanup;
 		}
 	}
+
+	orig_bytes = malloc (len);
+	if (!orig_bytes) {
+		eprintf ("Cannot allocate %d bytes", len);
+		ret = -1;
+		goto cleanup;
+	}
+
+	orig_len = r_io_peek_at (io, io->off, orig_bytes, len);
 
 	if (io->cached) {
 		ret = r_io_cache_write (io, io->off, buf, len);
 		if (ret == len) {
-			return len;
+			if (orig_len > 0 && io->cb_core_post_write) {
+				io->cb_core_post_write (io->user, maddr, orig_bytes, orig_len);
+			}
+			goto cleanup;
 		}
 		if (ret > 0) {
 			len -= ret;
@@ -669,12 +714,11 @@ R_API int r_io_write(RIO *io, const ut8 *buf, int len) {
 		data = (len > 0)? malloc (len): NULL;
 		if (!data) {
 			eprintf ("malloc failed in write_mask_fd");
-			return -1;
+			ret = -1;
+			goto cleanup;
 		}
 		// memset (data, io->Oxff, len);
-		r_io_seek (io, io->off, R_IO_SEEK_SET);
-		r_io_read (io, data, len);
-		r_io_seek (io, io->off, R_IO_SEEK_SET);
+		r_io_peek_at (io, io->off, data, len);
 		for (i = 0; i < len; i++) {
 			data[i] = buf[i] &
 				io->write_mask_buf[i % io->write_mask_len];
@@ -725,7 +769,15 @@ R_API int r_io_write(RIO *io, const ut8 *buf, int len) {
 			io->off += ret;
 		}
 	}
+
+	if (ret > 0 && orig_len > 0 && io->cb_core_post_write) {
+		io->cb_core_post_write (io->user, maddr, orig_bytes, orig_len);
+	}
+
+cleanup:
 	free (data);
+	free (orig_bytes);
+
 	return ret;
 }
 
@@ -793,7 +845,7 @@ R_API ut64 r_io_seek(RIO *io, ut64 offset, int whence) {
 		io->off = (whence == R_IO_SEEK_SET)
 			? offset // HACKY FIX linux-arm-32-bs at 0x10000
 			: ret;
-			io->off = offset; 
+			io->off = offset;
 		ret = (!io->debug && io->va && !r_list_empty (io->sections))
 			? r_io_section_maddr_to_vaddr (io, io->off)
 			: io->off;
@@ -807,7 +859,7 @@ R_API ut64 r_io_fd_size(RIO *io, int fd) {
 	return r_io_desc_size (io, desc);
 }
 
-R_API int r_io_is_blockdevice(RIO *io) {
+R_API bool r_io_is_blockdevice(RIO *io) {
 #if __UNIX__
 	if (io && io->desc && io->desc->fd) {
 		struct stat buf;
@@ -822,13 +874,13 @@ R_API int r_io_is_blockdevice(RIO *io) {
 			//	eprintf ("OPtimal blocksize: %d\n", buf.st_blksize);
 			if ((buf.st_mode & S_IFCHR) == S_IFCHR) {
 				io->desc->obsz = buf.st_blksize;
-				return 1;
+				return true;
 			}
 			return ((buf.st_mode & S_IFBLK) == S_IFBLK);
 		}
 	}
 #endif
-	return 0;
+	return false;
 }
 
 R_API ut64 r_io_size(RIO *io) {
@@ -1092,6 +1144,11 @@ if (hasperm) {
 			r_io_section_exists_for_vaddr (io, offset, hasperm));
 }
 #endif
+	if (r_list_empty (io->sections)) {
+		if ((r_io_map_exists_for_offset (io, offset))) {
+			return true;
+		}
+	}
 	if (!io_va) {
 		if ((r_io_map_exists_for_offset (io, offset))) {
 			return true;

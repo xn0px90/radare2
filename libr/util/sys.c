@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2009-2015 - pancake */
+/* radare - LGPL - Copyright 2009-2017 - pancake */
 
 #include <r_userconf.h>
 #include <stdlib.h>
@@ -272,7 +272,6 @@ R_API int r_sys_crash_handler(const char *cmd) {
 #if __UNIX__
 	struct sigaction sigact;
 	void *array[1];
-
 	if (!checkcmd (cmd)) {
 		return false;
 	}
@@ -391,7 +390,8 @@ R_API int r_sys_cmd_str_full(const char *cmd, const char *input, char **output, 
 		} else {
 			close (2);
 		}
-		close (sh_err[0]); close (sh_err[1]);
+		close (sh_err[0]);
+		close (sh_err[1]);
 		exit (r_sandbox_system (cmd, 0));
 	default:
 		outputptr = strdup ("");
@@ -460,7 +460,9 @@ R_API int r_sys_cmd_str_full(const char *cmd, const char *input, char **output, 
 					close (sh_in[1]);
 					/* If neither stdout nor stderr should be captured,
 					 * abort now - nothing more to do for select(). */
-					if (!output && !sterr) break;
+					if (!output && !sterr) {
+						break;
+					}
 				}
 			}
 		}
@@ -470,11 +472,13 @@ R_API int r_sys_cmd_str_full(const char *cmd, const char *input, char **output, 
 		close (sh_err[0]);
 		close (sh_in[1]);
 		waitpid (pid, &status, 0);
+		bool ret = true;
 		if (status) {
 			char *escmd = r_str_escape (cmd);
-			eprintf ("%s: failed command '%s'\n", __func__, escmd);
+			eprintf ("error code %d\n", WEXITSTATUS(status));
+			//eprintf ("%s: failed command '%s'\n", __func__, escmd);
 			free (escmd);
-			return false;
+			ret = false;
 		}
 
 		if (output) {
@@ -482,7 +486,7 @@ R_API int r_sys_cmd_str_full(const char *cmd, const char *input, char **output, 
 		} else {
 			free (outputptr);
 		}
-		return true;
+		return ret;
 	}
 	return false;
 }
@@ -878,4 +882,22 @@ R_API int r_sys_getpid() {
 #warning r_sys_getpid not implemented for this platform
 	return -1;
 #endif
+}
+
+R_API bool r_sys_tts(const char *txt, bool bg) {
+	int i;
+	const char *says[] = {
+		"say", "termux-tts-speak", NULL
+	};
+	for (i = 0; says[i]; i++) {
+		char *sayPath = r_file_path (says[i]);
+		if (sayPath) {
+			char *line = r_str_replace (strdup (txt), "'", "\"", 1);
+			r_sys_cmdf ("\"%s\" '%s'%s", sayPath, line, bg? " &": "");
+			free (line);
+			free (sayPath);
+			return true;
+		}
+	}
+	return false;
 }

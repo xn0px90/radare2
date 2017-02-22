@@ -180,6 +180,12 @@ R_API void r_mem_swapendian(ut8 *dest, const ut8 *orig, int size) {
 		dest[0] = orig[1];
 		dest[1] = buffer[0];
 		break;
+	case 3:
+		*buffer = *orig;
+		dest[0] = orig[2];
+		dest[1] = orig[1];
+		dest[2] = buffer[0];
+		break;
 	case 4:
 		memcpy (buffer, orig, 4);
 		dest[0] = buffer[3];
@@ -288,4 +294,14 @@ R_API void r_mem_reverse(ut8 *b, int l) {
 		b[i] = b[l - i - 1];
 		b[l - i - 1] = tmp;
 	}
+}
+
+R_API bool r_mem_is_printable (const ut8 *a, int la) {
+	int i;
+	for (i = 0; i< la; i++) {
+		if (a[i] != '\n' && a[i] != '\t' && !IS_PRINTABLE (a[i])) {
+			return false;
+		}
+	}
+	return true;
 }

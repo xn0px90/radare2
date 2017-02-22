@@ -309,10 +309,11 @@ static int fork_and_ptraceme(RIO *io, int bits, const char *cmd) {
 					exit (MAGIC_EXIT);
 				}
 			}
-			if (bits == 64)
+			if (bits == 64) {
 				r_run_parseline (rp, expr=strdup ("bits=64"));
-			else if (bits == 32)
+			} else if (bits == 32) {
 				r_run_parseline (rp, expr=strdup ("bits=32"));
+			}
 			free (expr);
 			if (r_run_config_env (rp)) {
 				eprintf ("Can't config the environment.\n");
@@ -389,7 +390,7 @@ static int get_pid_of(RIO *io, const char *procname) {
 		RListIter *iter;
 		RDebugPid *proc;
 		RDebug *d = c->dbg;
-		RList *pids = d->h->pids (0);
+		RList *pids = d->h->pids (d, 0);
 		r_list_foreach (pids, iter, proc) {
 			if (strstr (proc->path, procname)) {
 				eprintf ("Matching PID %d %s\n", proc->pid, proc->path);

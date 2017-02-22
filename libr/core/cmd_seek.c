@@ -1,4 +1,4 @@
-/* radare - LGPL - Copyright 2009-2016 - pancake */
+/* radare - LGPL - Copyright 2009-2017 - pancake */
 
 #include "r_types.h"
 #include "r_config.h"
@@ -16,6 +16,17 @@ static void __init_seek_line (RCore *core) {
 	if (r_core_lines_initcache (core, from, to) == -1) {
 		eprintf ("ERROR: \"lines.from\" and \"lines.to\" must be set\n");
 	}
+}
+
+static void printPadded(RCore *core, int pad) {
+	if (pad < 1) {
+		pad = 8;
+	}
+	char *fmt = r_str_newf ("0x%%0%d" PFMT64x, pad);
+	char *off = r_str_newf (fmt, core->offset);
+	r_cons_printf ("%s\n", off);
+	free (off);
+	free (fmt);
 }
 
 static void __get_current_line (RCore *core) {
@@ -90,15 +101,17 @@ R_API int r_core_lines_initcache (RCore *core, ut64 start_addr, ut64 end_addr) {
 
 	line_count = start_addr ? 0 : 1;
 	core->print->lines_cache[0] = start_addr ? 0 : baddr;
-	r_cons_break (NULL, NULL);
 	buf = malloc (bsz);
-	if (!buf) return -1;
+	if (!buf) {
+		return -1;
+	}
+	r_cons_break_push (NULL, NULL);
 	while (off < end_addr) {
-		if (r_cons_singleton ()->breaked) {
+		if (r_cons_is_breaked ()) {
 			break;
 		}
 		r_io_read_at (core->io, off, (ut8*)buf, bsz);
-		for (i=0; i<bsz; i++) {
+		for (i = 0; i < bsz; i++) {
 			if (buf[i] == '\n') {
 				core->print->lines_cache[line_count] = start_addr ? off+i+1 : off+i+1+baddr;
 				line_count++;
@@ -117,11 +130,11 @@ R_API int r_core_lines_initcache (RCore *core, ut64 start_addr, ut64 end_addr) {
 		off += bsz;
 	}
 	free (buf);
-	r_cons_break_end ();
+	r_cons_break_pop ();
 	return line_count;
 beach:
 	free (buf);
-	r_cons_break_end();
+	r_cons_break_pop ();
 	return -1;
 }
 
@@ -233,9 +246,14 @@ static int cmd_seek(void *data, const char *input) {
 					break;
 				}
 				free (cb.str);
-			} else eprintf ("Usage: sC[?*] comment-grep\n"
-				"sC*        list all comments\n"
-				"sC const   seek to comment matching 'const'\n");
+			} else {
+				const char *help_msg[] = {
+					"Usage:", "sC", "Comment grep",
+					"sC", "*", "List all comments",
+					"sC", " str", "Seek to the first comment matching 'str'",
+					NULL };
+				r_core_cmd_help (core, help_msg);
+			}
 			break;
 		case ' ':
 			r_io_sundo_push (core->io, core->offset, r_print_get_cursor (core->print));
@@ -369,7 +387,11 @@ static int cmd_seek(void *data, const char *input) {
 				int instr_len;
 				ut64 addr = core->offset;
 				int numinstr = n * -1;
-				ret = r_core_asm_bwdis_len (core, &instr_len, &addr, numinstr);
+				if (r_core_prevop_addr (core, core->offset, numinstr, &addr)) {
+					ret = core->offset - addr;
+				} else {
+					ret = r_core_asm_bwdis_len (core, &instr_len, &addr, numinstr);
+				}
 				r_core_seek (core, addr, true);
 				val += ret;
 			} else {
@@ -446,10 +468,14 @@ static int cmd_seek(void *data, const char *input) {
 			}
 			}
 			break;
+		case ':':
+			printPadded (core, atoi (input + 1));
+			break;
 		case '?': {
 			const char * help_message[] = {
 			"Usage: s", "", " # Seek commands",
 			"s", "", "Print current address",
+			"s:", "pad", "Print current address with N padded zeros (defaults to 8)",
 			"s", " addr", "Seek to address",
 			"s-", "", "Undo seek",
 			"s-", " n", "Seek n bytes backward",
@@ -463,11 +489,11 @@ static int cmd_seek(void *data, const char *input) {
 			"s.", "hexoff", "Seek honoring a base from core->offset",
 			"sa", " [[+-]a] [asz]", "Seek asz (or bsize) aligned to addr",
 			"sb", "", "Seek aligned to bb start",
-			"sC", " string", "Seek to comment matching given string",
+			"sC", "[?] string", "Seek to comment matching given string",
 			"sf", "", "Seek to next function (f->addr+f->size)",
 			"sf", " function", "Seek to address of specified function",
 			"sg/sG", "", "Seek begin (sg) or end (sG) of section or file",
-			"sl", "[+-]line", "Seek to line",
+			"sl", "[?] [+-]line", "Seek to line",
 			"sn/sp", "", "Seek next/prev scr.nkey",
 			"so", " [N]", "Seek to N next opcode(s)",
 			"sr", " pc", "Seek to register",

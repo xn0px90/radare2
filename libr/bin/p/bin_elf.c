@@ -49,7 +49,7 @@ static void * load_bytes(RBinFile *arch, const ut8 *buf, ut64 sz, ut64 loadaddr,
 	}
 	tbuf = r_buf_new ();
 	r_buf_set_bytes (tbuf, buf, sz);
-	res = Elf_(r_bin_elf_new_buf) (tbuf);
+	res = Elf_(r_bin_elf_new_buf) (tbuf, arch->rbin->verbose);
 	if (res) {
 		sdb_ns_set (sdb, "info", res->kv);
 	}
@@ -158,6 +158,7 @@ static RList* entries(RBinFile *arch) {
 	}
 	ptr->paddr = Elf_(r_bin_elf_get_entry_offset) (obj);
 	ptr->vaddr = Elf_(r_bin_elf_p2v) (obj, ptr->paddr);
+	ptr->haddr = 0x18;
 
 	if (obj->ehdr.e_machine == EM_ARM) {
 		int bin_bits = Elf_(r_bin_elf_get_bits) (obj);
@@ -188,6 +189,8 @@ static RList* sections(RBinFile *arch) {
 	if (!obj || !(ret = r_list_newf (free))) {
 		return NULL;
 	}
+	//there is not leak in section since they are cached by elf.c
+	//and freed within Elf_(r_bin_elf_free)
 	if ((section = Elf_(r_bin_elf_get_sections) (obj))) {
 		for (i = 0; !section[i].last; i++) {
 			if (!(ptr = R_NEW0 (RBinSection))) {
@@ -203,14 +206,17 @@ static RList* sections(RBinFile *arch) {
 			ptr->vaddr = section[i].rva;
 			ptr->add = true;
 			ptr->srwx = 0;
-			if (R_BIN_ELF_SCN_IS_EXECUTABLE (section[i].flags))
+			if (R_BIN_ELF_SCN_IS_EXECUTABLE (section[i].flags)) {
 				ptr->srwx |= R_BIN_SCN_EXECUTABLE;
-			if (R_BIN_ELF_SCN_IS_WRITABLE (section[i].flags))
+			}
+			if (R_BIN_ELF_SCN_IS_WRITABLE (section[i].flags)) {
 				ptr->srwx |= R_BIN_SCN_WRITABLE;
+			}
 			if (R_BIN_ELF_SCN_IS_READABLE (section[i].flags)) {
 				ptr->srwx |= R_BIN_SCN_READABLE;
-				if (obj->ehdr.e_type == ET_REL)
+				if (obj->ehdr.e_type == ET_REL) {
 					ptr->srwx |= R_BIN_SCN_MAP;
+				}
 			}
 			r_list_append (ret, ptr);
 		}
@@ -351,7 +357,9 @@ arm_symbol:
 		}
 	}
 }
+
 static RBinInfo* info(RBinFile *arch);
+
 static RList* symbols(RBinFile *arch) {
 	struct Elf_(r_bin_elf_obj_t) *bin;
 	struct r_bin_elf_symbol_t *symbol = NULL;
@@ -649,7 +657,7 @@ static void __patch_reloc (RIOBind *iob, RBinElfReloc *rel, ut64 vaddr) {
 		{
 			ut64 num = r_swap_ut64(vaddr);
 			snprintf (s, sizeof (s), "%08"PFMT64x, num);
-			write_into_reloc();
+			write_into_reloc ();
 		}
 		break;
 	default:
@@ -723,8 +731,9 @@ static RList* patch_relocs(RBin *b) {
 			continue;
 		}
 		ptr->vaddr = sym_addr ? sym_addr : vaddr;
-		if (!sym_addr)
+		if (!sym_addr) {
 			vaddr += 4;
+		}
 		r_list_append (ret, ptr);
 		sym_addr = 0;
 	}
@@ -807,11 +816,14 @@ static RBinInfo* info(RBinFile *arch) {
 	ret->has_nx = Elf_(r_bin_elf_has_nx) (arch->o->bin_obj);
 	ret->intrp = Elf_(r_bin_elf_intrp) (arch->o->bin_obj);
 	ret->dbg_info = 0;
-	if (!Elf_(r_bin_elf_get_stripped) (arch->o->bin_obj))
+	if (!Elf_(r_bin_elf_get_stripped) (arch->o->bin_obj)) {
 		ret->dbg_info |= R_BIN_DBG_LINENUMS | R_BIN_DBG_SYMS | R_BIN_DBG_RELOCS;
-	else  ret->dbg_info |= R_BIN_DBG_STRIPPED;
-	if (Elf_(r_bin_elf_get_static) (arch->o->bin_obj))
+	} else {
+		ret->dbg_info |= R_BIN_DBG_STRIPPED;
+	}
+	if (Elf_(r_bin_elf_get_static) (arch->o->bin_obj)) {
 		ret->dbg_info |= R_BIN_DBG_STATIC;
+	}
 	return ret;
 }
 
@@ -903,10 +915,11 @@ static RBuffer* create(RBin* bin, const ut8 *code, int codelen, const ut8 *data,
 	B ("\x7F" "ELF" "\x01\x01\x01\x00", 8);
 	Z (8);
 	H (2); // ET_EXEC
-	if (is_arm)
+	if (is_arm) {
 		H (40); // e_machne = EM_ARM
-	else
+	} else {
 		H (3); // e_machne = EM_I386
+	}
 
 	D (1);
 	p_start = buf->length;
@@ -960,7 +973,7 @@ static RBuffer* create(RBin* bin, const ut8 *code, int codelen, const ut8 *data,
 
 	B (code, codelen);
 
-	if (data && datalen>0) {
+	if (data && datalen > 0) {
 		//ut32 data_section = buf->length;
 		eprintf ("Warning: DATA section not support for ELF yet\n");
 		B (data, datalen);
